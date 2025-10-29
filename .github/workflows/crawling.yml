@@ -1,65 +1,58 @@
-name: Naver Property Scraper
+name: Naver Property Crawler
 
-# 매일 한국 시간 (KST) 오전 10시에 실행
+# 워크플로 실행 조건: main 브랜치에 푸시가 발생할 때 자동 실행
 on:
+  push:
+    branches:
+      - main
+  # 수동 실행 옵션 (필요한 경우)
   workflow_dispatch:
-  schedule:
-    - cron: '0 1 * * *' 
 
 jobs:
-  scrape:
+  crawl:
+    # 실행 환경 설정 (GitHub Actions의 서버)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # 타임존을 한국 시간으로 설정 (로그 시간 확인 용이)
+    env:
+      TZ: Asia/Seoul
 
     steps:
-    - name: ⬇️ 코드 체크아웃
-      uses: actions/checkout@v4
+      # 1. 코드 체크아웃
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-    - name: 🐍 Python 3.10 설정
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.10'
-    # (기존 스크립트 실행 스텝 아래에 추가)
-    - name: Upload Screenshots as Artifact
+      # 2. Python 환경 설정
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11' # 사용하시는 Python 버전에 맞게 설정
+
+      # 3. 의존성 설치 및 Playwright 브라우저 설치
+      - name: Install dependencies and Playwright Browsers
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          # Playwright가 사용할 Chromium 브라우저를 설치합니다.
+          playwright install chromium --with-deps
+
+      # 4. 서비스 계정 파일 생성 (구글 시트/드라이브 접근용)
+      # GitHub Secrets에 PRIVATE_KEY와 같은 내용이 설정되어 있어야 합니다.
+      - name: Create service_account.json
+        run: |
+          echo "${{ secrets.SERVICE_ACCOUNT_JSON }}" > service_account.json
+        # SERVICE_ACCOUNT_JSON은 GitHub Secrets에 JSON 내용을 통째로 넣어두는 것을 가정합니다.
+        # 환경 변수 SPREADSHEET_ID도 Secrets에 설정되어야 main.py에서 사용 가능합니다.
+        env:
+          SERVICE_ACCOUNT_JSON: ${{ secrets.SERVICE_ACCOUNT_JSON }}
+
+      # 5. 크롤러 스크립트 실행
+      - name: Run Crawler Script
+        run: python main.py
+
+      # 6. 🚨 (핵심) 스크린샷 파일을 아티팩트로 업로드 
+      - name: Upload Screenshots as Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: crawl-screenshots-${{ github.sha }}  # 아티팩트 이름
-          path: '*.png' # 현재 디렉토리에 있는 모든 PNG 파일을 업로드
+          name: crawl-screenshots-${{ github.sha }}  # 아티팩트 이름 (commit SHA 포함)
+          path: '*.png' # 현재 디렉토리에 있는 모든 PNG 파일을 수집하여 업로드합니다.
           retention-days: 7 # 7일간 보관
-
-    - name: 📦 Python 의존성 설치
-      run: pip install -r requirements.txt
-
-    - name: 🌐 Playwright 시스템 종속성 및 브라우저 설치 (오류 우회 해결)
-      # libasound2 문제 및 기타 종속성 문제를 우회하고 브라우저를 설치합니다.
-      run: |
-        echo "Updating apt cache and installing core dependencies..."
-        sudo apt-get update
-        
-        # APT 설치 실패 시에도 다음 명령어를 진행하도록 '|| true' 추가
-        # libasound2 대신 libasound2t64 설치 시도 및 기타 필수 패키지 설치
-        sudo apt-get install -y --no-install-recommends \
-          libnss3 \
-          libatk-bridge2.0-0 \
-          libxkbcommon0 \
-          libgtk-3-0 \
-          libgbm1 \
-          libasound2t64 \
-          libxdamage1 \
-          libpangocairo-1.0-0 \
-          libu2f-udev \
-          libvulkan1 || true
-        
-        echo "Installing Playwright Chromium browser..."
-        # Playwright 브라우저 설치 (시스템 종속성이 부족해도 자체 설치 시도)
-        python -m playwright install chromium
-
-    - name: 🔑 Google 서비스 계정 파일 생성
-      env:
-        GCP_SERVICE_ACCOUNT_KEY: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}
-      run: echo "$GCP_SERVICE_ACCOUNT_KEY" > service_account.json
-
-    - name: 🚀 네이버 부동산 크롤링 실행 및 구글 시트 기록
-      env:
-        SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
-      run: python main.py
