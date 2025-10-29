@@ -128,9 +128,11 @@ class AggressiveCardScroll:
         start_time = time.time()
         
         browser = None
+        page = None
+        
         try:
             async with async_playwright() as p:
-                # 🚨 [수정]: User-Agent를 명시적으로 설정하여 봇 감지 우회 시도
+                # 🚨 User-Agent를 명시적으로 설정하여 봇 감지 우회 시도
                 user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'
                 
                 print("DEBUG: 1. Playwright 시작 및 Chromium 브라우저 실행 시도...", flush=True)
@@ -141,15 +143,16 @@ class AggressiveCardScroll:
                 ) 
                 print("DEBUG: 2. Chromium 브라우저 실행 성공. (User-Agent 설정 완료)", flush=True)
                 
-                # 🚨 [수정]: Context를 생성하고 추가 HTTP 헤더 설정 (Referer, Accept-Language)
+                # 🚨 Context를 생성하고 추가 HTTP 헤더 및 뷰포트 설정
                 context = await browser.new_context(
+                    viewport={'width': 1920, 'height': 1080}, # 1920x1080 뷰포트 설정 추가
                     extra_http_headers={
-                        'Referer': 'https://www.naver.com/', # 네이버 메인에서 온 것처럼
-                        'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7' # 한국어 선호 설정
+                        'Referer': 'https://www.naver.com/', 
+                        'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7'
                     }
                 )
-                page = await context.new_page() # Context로 페이지 생성
-                print("DEBUG: 3. 새 페이지 생성 완료. (HTTP 헤더 설정 완료)", flush=True)
+                page = await context.new_page() 
+                print("DEBUG: 3. 새 페이지 생성 완료. (HTTP 헤더, 1920x1080 뷰포트 설정 완료)", flush=True)
                 
                 url = self.BASE_URL.format(complex_id=self.complex_id)
                 
@@ -158,11 +161,23 @@ class AggressiveCardScroll:
                 await page.goto(url, timeout=DEFAULT_TIMEOUT_MS)
                 print("DEBUG: 5. 페이지 접속 성공 (Network Idle).", flush=True)
                 
+                # 🚨 [핵심 추가]: 현재 URL 확인 (리다이렉션 여부 체크)
+                current_url = page.url
+                print(f"DEBUG: 5-A. 현재 URL: {current_url}", flush=True)
+                
                 # 핵심 요소 'div.item_area' 대기 로직 제거 후 5초 강제 대기
                 print("DEBUG: 6. 핵심 요소 'div.item_area' 대기 로직 제거. JavaScript 로드를 위해 5초 강제 대기 후 스크롤 진입.", flush=True)
                 await page.wait_for_timeout(5000) # 5초 강제 대기
                 print("DEBUG: 7. 5초 대기 완료. 스크롤 시작 준비.", flush=True)
                 
+                # 🚨 [사용자 요청 반영]: 스크롤 직전 상태 스크린샷 캡처
+                if page:
+                    print("***DEBUG: 스크롤 직전 페이지 상태 스크린샷 캡처 시도***", flush=True)
+                    screenshot_filename = f"{self.complex_name}_SCROLL_START_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+                    await page.screenshot(path=screenshot_filename, full_page=True)
+                    print(f"***DEBUG: 스크롤 직전 스크린샷 저장 완료: {screenshot_filename}***", flush=True)
+                    self.error_screenshot_path = screenshot_filename
+
                 # 매물 전체 개수 파싱
                 total_text_locator = page.locator('div.view_info > p.summary > em').first
                 try:
@@ -239,8 +254,9 @@ class AggressiveCardScroll:
             
             # 🚨 타임아웃 발생 시 스크린샷 저장 로직
             try:
-                screenshot_filename = f"{self.complex_name}_TIMEOUT_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
-                if page:
+                # SCROLL_START 스크린샷이 없거나, 타임아웃이 페이지 접속 후 바로 났다면 추가로 캡처
+                if page and not self.error_screenshot_path:
+                    screenshot_filename = f"{self.complex_name}_TIMEOUT_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
                     await page.screenshot(path=screenshot_filename, full_page=True)
                     print(f"***오류 스크린샷 저장 완료: {screenshot_filename} (GitHub Actions 로그에서 확인)***", flush=True)
                     self.error_screenshot_path = screenshot_filename
@@ -336,7 +352,7 @@ def execute_crawling_and_record():
             
             print(f"=== {complex_info['name']} 크롤링 완료: {len(property_list)}개 매물 ({complex_duration:.1f}초) ===", flush=True)
             if screenshot_path:
-                 print(f"***타임아웃 발생 지점 스크린샷: {screenshot_path}***", flush=True)
+                 print(f"***스크린샷 저장 경로: {screenshot_path}***", flush=True)
 
             # 매물 데이터 정리 및 일괄 기록 리스트에 추가 (로직 생략)
             property_rows = []
@@ -427,7 +443,7 @@ def execute_crawling_and_record():
                 'complex_name': complex_info['name'],
                 'property_count': len(property_list),
                 'duration_seconds': complex_duration,
-                'status': 'success' if not screenshot_path else 'timeout_error',
+                'status': 'success' if len(property_list) > 0 else 'zero_property',
                 'screenshot_path': screenshot_path
             })
             
@@ -465,7 +481,7 @@ def execute_crawling_and_record():
     print(f"종료시간: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", flush=True)
     print(f"전체 소요시간: {total_duration:.1f}초 ({total_duration/60:.1f}분)", flush=True)
     print(f"성공한 단지: {len(successful)}개", flush=True)
-    print(f"실패/타임아웃 단지: {len(failed)}개", flush=True)
+    print(f"실패/0개 단지: {len(failed)}개", flush=True)
     print(f"총 매물 수: {total_properties}개", flush=True)
 
 
