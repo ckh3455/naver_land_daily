@@ -69,7 +69,7 @@ def upload_to_google_drive(file_path, file_name, folder_id=None):
             fields='id'
         ).execute()
         
-        print(f"드라이브 업로드 성공: {file.get('id')}")
+        print(f"드라이브 업로드 성공: {file.get('id')}", flush=True)
         return file.get('id')
     except Exception as e:
         return None
@@ -79,7 +79,7 @@ def setup_google_sheets():
     try:
         credentials_file = 'service_account.json'
         if not os.path.exists(credentials_file):
-            print(f"서비스 계정 파일이 없습니다: {credentials_file}")
+            print(f"서비스 계정 파일이 없습니다: {credentials_file}", flush=True)
             return None
         
         credentials = service_account.Credentials.from_service_account_file(
@@ -90,7 +90,7 @@ def setup_google_sheets():
         gc = gspread.authorize(credentials)
         spreadsheet_id = os.environ.get('SPREADSHEET_ID')
         if not spreadsheet_id:
-            print("환경 변수 SPREADSHEET_ID가 설정되지 않았습니다.")
+            print("환경 변수 SPREADSHEET_ID가 설정되지 않았습니다.", flush=True)
             return None
             
         spreadsheet = gc.open_by_key(spreadsheet_id)
@@ -98,14 +98,14 @@ def setup_google_sheets():
         worksheet_name = "네이버 매물분석"
         try:
             worksheet = spreadsheet.worksheet(worksheet_name)
-            print(f"구글 시트 '{worksheet_name}' 연결 성공")
+            print(f"구글 시트 '{worksheet_name}' 연결 성공", flush=True)
             return worksheet
         except gspread.WorksheetNotFound:
             worksheet = spreadsheet.add_worksheet(title=worksheet_name, rows=1000, cols=20)
-            print(f"구글 시트 탭 '{worksheet_name}' 생성 완료")
+            print(f"구글 시트 탭 '{worksheet_name}' 생성 완료", flush=True)
             return worksheet
     except Exception as e:
-        print(f"구글 시트 설정 실패: {e}")
+        print(f"구글 시트 설정 실패: {e}", flush=True)
         return None
 
 
@@ -124,31 +124,32 @@ class AggressiveCardScroll:
         self.error_screenshot_path = None # 에러 발생 시 스크린샷 경로 저장용
 
     async def run(self):
-        print(f"--- {self.complex_name} 크롤링 시작 ---")
+        print(f"--- {self.complex_name} 크롤링 시작 ---", flush=True)
         start_time = time.time()
         
         browser = None
         try:
             async with async_playwright() as p:
-                print("DEBUG: 1. Playwright 시작 및 Chromium 브라우저 실행 시도...")
-                # Playwright 실행에 90초 타임아웃 적용 (브라우저 실행 지연 대비)
+                # 🚨 로그 강제 출력 (flush=True) 적용
+                print("DEBUG: 1. Playwright 시작 및 Chromium 브라우저 실행 시도...", flush=True)
+                # 이 부분이 90초를 초과하면 TimeoutError가 발생해야 합니다.
                 browser = await p.chromium.launch(headless=True, timeout=DEFAULT_TIMEOUT_MS) 
-                print("DEBUG: 2. Chromium 브라우저 실행 성공.")
+                print("DEBUG: 2. Chromium 브라우저 실행 성공.", flush=True)
                 
                 page = await browser.new_page()
-                print("DEBUG: 3. 새 페이지 생성 완료.")
+                print("DEBUG: 3. 새 페이지 생성 완료.", flush=True)
                 
                 url = self.BASE_URL.format(complex_id=self.complex_id)
                 
                 # 1. 페이지 접속 및 대기 (타임아웃 90초 적용)
-                print(f"DEBUG: 4. URL 접속 시도: {url} (Timeout: {DEFAULT_TIMEOUT_MS/1000}s)")
+                print(f"DEBUG: 4. URL 접속 시도: {url} (Timeout: {DEFAULT_TIMEOUT_MS/1000}s)", flush=True)
                 await page.goto(url, timeout=DEFAULT_TIMEOUT_MS)
-                print("DEBUG: 5. 페이지 접속 성공 (Network Idle).")
+                print("DEBUG: 5. 페이지 접속 성공 (Network Idle).", flush=True)
                 
                 # 매물 리스트 영역이 나타날 때까지 대기 (타임아웃 90초 적용)
-                print("DEBUG: 6. 핵심 요소 'div.item_area' 대기 시도.")
+                print("DEBUG: 6. 핵심 요소 'div.item_area' 대기 시도.", flush=True)
                 await page.wait_for_selector('div.item_area', timeout=DEFAULT_TIMEOUT_MS)
-                print("DEBUG: 7. 핵심 요소 대기 성공. 스크롤 시작 준비.")
+                print("DEBUG: 7. 핵심 요소 대기 성공. 스크롤 시작 준비.", flush=True)
                 
                 # 매물 전체 개수 파싱
                 total_text = await page.locator('div.view_info > p.summary > em').first.inner_text()
@@ -156,10 +157,10 @@ class AggressiveCardScroll:
                 self.total_count = int(total_match.group(0)) if total_match else 0
                 
                 if self.total_count == 0:
-                    print(f"경고: {self.complex_name} 매물 0개 확인.")
+                    print(f"경고: {self.complex_name} 매물 0개 확인.", flush=True)
                     return {'property_count': 0, 'properties': []}
                 
-                print(f"총 {self.total_count}개 매물 확인. 크롤링 시작...")
+                print(f"총 {self.total_count}개 매물 확인. 크롤링 시작...", flush=True)
 
                 # 2. 크롤링 루프 (무한 스크롤)
                 properties_set = set() # 매물 번호(articleNo) 중복 제거용
@@ -192,7 +193,7 @@ class AggressiveCardScroll:
                     # 🚨 [실시간 로그]: 100개 단위로 진행 상황 로그 출력
                     current_count = len(properties_set)
                     if newly_parsed_count > 0 and (current_count // 100) != (previous_count // 100):
-                        print(f"-> 진행 중: 현재까지 {self.complex_name}에서 {current_count}개 매물 수집 완료.")
+                        print(f"-> 진행 중: 현재까지 {self.complex_name}에서 {current_count}개 매물 수집 완료.", flush=True)
                         
                     # 3. 스크롤 다운
                     await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
@@ -203,31 +204,31 @@ class AggressiveCardScroll:
                     
                     # 더 이상 스크롤이 내려가지 않고, 새로 파싱된 매물이 없다면 종료
                     if new_scroll_height == last_scroll_height and newly_parsed_count == 0:
-                        print(f"-> 스크롤 종료 지점 도달. 최종 매물 수: {len(self.properties)}")
+                        print(f"-> 스크롤 종료 지점 도달. 최종 매물 수: {len(self.properties)}", flush=True)
                         break
                         
                     # 매물 수가 목표치에 도달하면 종료
                     if len(self.properties) >= self.total_count and self.total_count > 0:
-                        print(f"-> 목표 매물 수({self.total_count}개) 도달. 최종 매물 수: {len(self.properties)}")
+                        print(f"-> 목표 매물 수({self.total_count}개) 도달. 최종 매물 수: {len(self.properties)}", flush=True)
                         break
 
                     # 마지막 높이 업데이트
                     last_scroll_height = new_scroll_height
                     
         except PlaywrightTimeoutError:
-            print(f"오류: {self.complex_name} 크롤링 타임아웃 발생 (Timeout: {DEFAULT_TIMEOUT_MS/1000}s)")
+            print(f"오류: {self.complex_name} 크롤링 타임아웃 발생 (Timeout: {DEFAULT_TIMEOUT_MS/1000}s)", flush=True)
             
             # 🚨 타임아웃 발생 시 스크린샷 저장 로직
             try:
                 screenshot_filename = f"{self.complex_name}_TIMEOUT_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
                 await page.screenshot(path=screenshot_filename, full_page=True)
-                print(f"***오류 스크린샷 저장 완료: {screenshot_filename} (GitHub Actions 로그에서 확인)***")
+                print(f"***오류 스크린샷 저장 완료: {screenshot_filename} (GitHub Actions 로그에서 확인)***", flush=True)
                 self.error_screenshot_path = screenshot_filename
             except Exception as e_shot:
-                print(f"경고: 스크린샷 캡처 실패 - {e_shot}")
+                print(f"경고: 스크린샷 캡처 실패 - {e_shot}", flush=True)
                 
         except Exception as e:
-            print(f"치명적인 오류: {self.complex_name} 크롤링 실패 - {e}")
+            print(f"치명적인 오류: {self.complex_name} 크롤링 실패 - {e}", flush=True)
             
         finally:
             if browser:
@@ -252,8 +253,8 @@ class AggressiveCardScroll:
 def execute_crawling_and_record():
     """23개 단지를 순차적으로 크롤링하고 구글 시트에 기록"""
     
-    print(f"\n=== 23개 단지 자동 크롤링 시작 ===")
-    print(f"시작시간: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"\n=== 23개 단지 자동 크롤링 시작 ===", flush=True)
+    print(f"시작시간: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", flush=True)
     
     results = []
     total_start_time = time.time()
@@ -263,7 +264,7 @@ def execute_crawling_and_record():
     
     if worksheet:
         try:
-            print("=== 기존 구글 시트 데이터 삭제 (헤더 유지) 시작 ===")
+            print("=== 기존 구글 시트 데이터 삭제 (헤더 유지) 시작 ===", flush=True)
             
             actual_data_rows = 1
             try:
@@ -272,35 +273,35 @@ def execute_crawling_and_record():
             except Exception as e:
                  error_msg = str(e)
                  if 'PERMISSION_DENIED' in error_msg:
-                     print(f"***경고: 구글 시트 초기화 중 권한 오류 발생. 크롤링은 진행됩니다. (오류: {error_msg})***")
+                     print(f"***경고: 구글 시트 초기화 중 권한 오류 발생. 크롤링은 진행됩니다. (오류: {error_msg})***", flush=True)
                      worksheet = None 
                  else:
-                     print(f"경고: 시트 정보 조회 중 오류 발생: {e}")
+                     print(f"경고: 시트 정보 조회 중 오류 발생: {e}", flush=True)
                  actual_data_rows = 1 
             
             if worksheet:
                 if actual_data_rows > 1:
                     worksheet.delete_rows(2, actual_data_rows)
-                    print(f"=== 2행부터 {actual_data_rows}행까지 기존 데이터 삭제 완료. ===")
+                    print(f"=== 2행부터 {actual_data_rows}행까지 기존 데이터 삭제 완료. ===", flush=True)
                 else:
-                    print("=== 헤더(1행) 외에 기존 데이터가 없거나 시트가 비어있습니다. ===")
+                    print("=== 헤더(1행) 외에 기존 데이터가 없거나 시트가 비어있습니다. ===", flush=True)
                     
                 if actual_data_rows <= 1 or not worksheet.row_values(1) or worksheet.row_values(1) == ['']:
                     headers = ["단지명", "거래구분", "동", "층수", "면적", "가격", "가격변동", "중복업소", "중개업소", "등록일자", "특기사항", "제공", "매물번호"]
                     worksheet.append_row(headers)
-                    print("=== 구글 시트 헤더 추가 완료 ===")
+                    print("=== 구글 시트 헤더 추가 완료 ===", flush=True)
             
         except Exception as e:
-            print(f"경고: 구글 시트 초기화/삭제 실패: ***{e}***")
+            print(f"경고: 구글 시트 초기화/삭제 실패: ***{e}***", flush=True)
             worksheet = None 
     else:
-        print("경고: 구글 시트 연결 실패. 데이터 기록을 건너뜁니다.")
+        print("경고: 구글 시트 연결 실패. 데이터 기록을 건너뜁니다.", flush=True)
 
     # 2. 실제 크롤링 실행 및 데이터 수집
     all_rows_to_append = []
 
     for i, complex_info in enumerate(COMPLEXES):
-        print(f"\n=== 단지 {i+1}/{len(COMPLEXES)}: {complex_info['name']} 크롤링 시작 ===")
+        print(f"\n=== 단지 {i+1}/{len(COMPLEXES)}: {complex_info['name']} 크롤링 시작 ===", flush=True)
         complex_start_time = time.time()
         
         try:
@@ -313,9 +314,9 @@ def execute_crawling_and_record():
             property_list = result.get('properties', [])
             screenshot_path = result.get('error_screenshot_path')
             
-            print(f"=== {complex_info['name']} 크롤링 완료: {len(property_list)}개 매물 ({complex_duration:.1f}초) ===")
+            print(f"=== {complex_info['name']} 크롤링 완료: {len(property_list)}개 매물 ({complex_duration:.1f}초) ===", flush=True)
             if screenshot_path:
-                 print(f"***타임아웃 발생 지점 스크린샷: {screenshot_path}***")
+                 print(f"***타임아웃 발생 지점 스크린샷: {screenshot_path}***", flush=True)
 
             # 매물 데이터 정리 및 일괄 기록 리스트에 추가 (로직 생략)
             property_rows = []
@@ -414,7 +415,7 @@ def execute_crawling_and_record():
             complex_end_time = time.time()
             complex_duration = complex_end_time - complex_start_time
             
-            print(f"=== {complex_info['name']} 크롤링 실패: {e} ({complex_duration:.1f}초) ===")
+            print(f"=== {complex_info['name']} 크롤링 실패: {e} ({complex_duration:.1f}초) ===", flush=True)
             
             results.append({
                 'complex_name': complex_info['name'],
@@ -428,9 +429,9 @@ def execute_crawling_and_record():
     if worksheet and all_rows_to_append:
         try:
             worksheet.append_rows(all_rows_to_append)
-            print(f"\n=== 최종 구글 시트 기록 완료: {len(all_rows_to_append)}개 매물 ===")
+            print(f"\n=== 최종 구글 시트 기록 완료: {len(all_rows_to_append)}개 매물 ===", flush=True)
         except Exception as e:
-            print(f"\n=== 최종 구글 시트 일괄 기록 실패: {e} ===")
+            print(f"\n=== 최종 구글 시트 일괄 기록 실패: {e} ===", flush=True)
     
     # 4. 결과 요약 출력
     total_end_time = time.time()
@@ -440,12 +441,12 @@ def execute_crawling_and_record():
     failed = [r for r in results if r['status'] != 'success']
     total_properties = sum(r['property_count'] for r in results)
     
-    print(f"\n=== 23개 단지 크롤링 최종 요약 ===")
-    print(f"종료시간: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"전체 소요시간: {total_duration:.1f}초 ({total_duration/60:.1f}분)")
-    print(f"성공한 단지: {len(successful)}개")
-    print(f"실패/타임아웃 단지: {len(failed)}개")
-    print(f"총 매물 수: {total_properties}개")
+    print(f"\n=== 23개 단지 크롤링 최종 요약 ===", flush=True)
+    print(f"종료시간: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", flush=True)
+    print(f"전체 소요시간: {total_duration:.1f}초 ({total_duration/60:.1f}분)", flush=True)
+    print(f"성공한 단지: {len(successful)}개", flush=True)
+    print(f"실패/타임아웃 단지: {len(failed)}개", flush=True)
+    print(f"총 매물 수: {total_properties}개", flush=True)
 
 
 # ======================================================================
