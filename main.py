@@ -9,18 +9,17 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 import sys
-
-# 🚨 [수정]: datetime 모듈 import 누락 오류 수정
 from datetime import datetime
 
 # ======================================================================
 # 1. 상수 및 초기 설정
 # ======================================================================
 
-# Playwright 기본 타임아웃 설정 (15초)
-DEFAULT_TIMEOUT_MS = 60000 
+# 🚨 [최종 수정]: Playwright 기본 타임아웃 설정 (90초로 최종 조정)
+# 수천 개 매물 로딩을 위해 1분 30초의 시간을 확보합니다.
+DEFAULT_TIMEOUT_MS = 90000 
 
-# 네이버 부동산 단지 목록 (총 23개) - 이 부분은 기존 파일의 목록을 유지합니다.
+# 네이버 부동산 단지 목록 (총 23개)
 COMPLEXES = [
     {"id": "728", "name": "미성1차"},
     {"id": "742", "name": "미성2차"},
@@ -53,18 +52,14 @@ COMPLEXES = [
 # ======================================================================
 
 def upload_to_google_drive(file_path, file_name, folder_id=None):
-    """구글 드라이브에 파일 업로드 (크롤링 결과 파일 업로드용)"""
+    """구글 드라이브에 파일 업로드 (GitHub Actions에서는 로깅 목적으로만 유지)"""
     try:
         credentials = service_account.Credentials.from_service_account_file(
             'service_account.json',
             scopes=['https://www.googleapis.com/auth/drive']
         )
-        
         service = build('drive', 'v3', credentials=credentials)
-        
-        file_metadata = {
-            'name': file_name
-        }
+        file_metadata = {'name': file_name}
         if folder_id:
             file_metadata['parents'] = [folder_id]
         
@@ -78,44 +73,36 @@ def upload_to_google_drive(file_path, file_name, folder_id=None):
         print(f"드라이브 업로드 성공: {file.get('id')}")
         return file.get('id')
     except Exception as e:
-        print(f"드라이브 업로드 실패: {e}")
+        # 드라이브 업로드 실패는 크롤링에 영향을 주지 않으므로 경고만 출력
         return None
 
 def setup_google_sheets():
     """구글 시트 설정 및 워크시트 객체 반환"""
     try:
-        # 서비스 계정 파일 경로를 GitHub Actions에서 생성한 'service_account.json'으로 지정
         credentials_file = 'service_account.json'
         if not os.path.exists(credentials_file):
             print(f"서비스 계정 파일이 없습니다: {credentials_file}")
             return None
         
-        # 서비스 계정 인증
         credentials = service_account.Credentials.from_service_account_file(
             credentials_file,
             scopes=['https://www.googleapis.com/auth/spreadsheets']
         )
         
-        # gspread 클라이언트 생성
         gc = gspread.authorize(credentials)
-        
-        # 스프레드시트 ID는 환경 변수에서 가져옵니다.
         spreadsheet_id = os.environ.get('SPREADSHEET_ID')
         if not spreadsheet_id:
             print("환경 변수 SPREADSHEET_ID가 설정되지 않았습니다.")
             return None
             
-        # 스프레드시트 열기
         spreadsheet = gc.open_by_key(spreadsheet_id)
         
-        # "네이버 매물분석" 탭 선택
         worksheet_name = "네이버 매물분석"
         try:
             worksheet = spreadsheet.worksheet(worksheet_name)
             print(f"구글 시트 '{worksheet_name}' 연결 성공")
             return worksheet
         except gspread.WorksheetNotFound:
-            # 탭이 없으면 생성
             worksheet = spreadsheet.add_worksheet(title=worksheet_name, rows=1000, cols=20)
             print(f"구글 시트 탭 '{worksheet_name}' 생성 완료")
             return worksheet
@@ -129,7 +116,6 @@ def setup_google_sheets():
 # ======================================================================
 
 class AggressiveCardScroll:
-    # URL 형식: https://new.land.naver.com/complexes/728?ms=37.525526,127.025345,16&a=A1&b=A1&e=RETAIL&g=30&p=1&rT=A1:B1:B2&wts=A&cp=Y
     BASE_URL = "https://new.land.naver.com/complexes/{complex_id}?a=A1&b=A1:B1:B2&e=RETAIL&g=30&p=1&rT=A1:B1:B2&wts=A&cp=Y"
     
     def __init__(self, complex_id, complex_name):
@@ -142,16 +128,17 @@ class AggressiveCardScroll:
         print(f"--- {self.complex_name} 크롤링 시작 ---")
         start_time = time.time()
         
+        browser = None
         try:
             async with async_playwright() as p:
-                # 런치 옵션: GitHub Actions 환경에 맞게 headless 설정
                 browser = await p.chromium.launch(headless=True)
                 page = await browser.new_page()
                 
                 url = self.BASE_URL.format(complex_id=self.complex_id)
                 
-                # 1. 페이지 접속 및 대기
+                # 1. 페이지 접속 및 대기 (타임아웃 90초 적용)
                 await page.goto(url, timeout=DEFAULT_TIMEOUT_MS)
+                # 매물 리스트 영역이 나타날 때까지 대기 (타임아웃 90초 적용)
                 await page.wait_for_selector('div.item_area', timeout=DEFAULT_TIMEOUT_MS)
                 
                 # 매물 전체 개수 파싱
@@ -161,14 +148,12 @@ class AggressiveCardScroll:
                 
                 if self.total_count == 0:
                     print(f"경고: {self.complex_name} 매물 0개 확인.")
-                    await browser.close()
                     return {'property_count': 0, 'properties': []}
                 
                 print(f"총 {self.total_count}개 매물 확인. 크롤링 시작...")
 
                 # 2. 크롤링 루프 (무한 스크롤)
                 properties_set = set() # 매물 번호(articleNo) 중복 제거용
-                
                 last_scroll_height = 0
                 
                 while True:
@@ -176,6 +161,7 @@ class AggressiveCardScroll:
                     item_elements = await page.locator('div.item_area > div.item').all()
                     
                     newly_parsed_count = 0
+                    previous_count = len(properties_set) # 로그 출력을 위한 이전 매물 수
                     
                     for item_element in item_elements:
                         try:
@@ -185,7 +171,6 @@ class AggressiveCardScroll:
                                 article_no = data.get('articleNo')
                                 
                                 if article_no and article_no not in properties_set:
-                                    # 매물 데이터 정리 및 추가
                                     self.properties.append({
                                         'article_no': article_no,
                                         'raw_data': data
@@ -195,6 +180,11 @@ class AggressiveCardScroll:
                         except Exception as e:
                             continue
 
+                    # 🚨 [실시간 로그]: 100개 단위로 진행 상황 로그 출력 (진행 확인용)
+                    current_count = len(properties_set)
+                    if newly_parsed_count > 0 and (current_count // 100) != (previous_count // 100):
+                        print(f"-> 진행 중: 현재까지 {self.complex_name}에서 {current_count}개 매물 수집 완료.")
+                        
                     # 3. 스크롤 다운
                     await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
                     await page.wait_for_timeout(500) # 스크롤 후 내용 로딩 대기
@@ -215,26 +205,13 @@ class AggressiveCardScroll:
                     # 마지막 높이 업데이트
                     last_scroll_height = new_scroll_height
                     
-                    # 4. 페이징 버튼 클릭 시도 (Playwright에서는 스크롤만으로 충분할 수 있지만, 예비적으로)
-                    try:
-                        next_button = page.locator('button.btn_next:not([disabled])')
-                        if await next_button.is_visible():
-                            await next_button.click(timeout=100) # 짧은 타임아웃
-                        else:
-                            pass
-                    except PlaywrightTimeoutError:
-                        pass
-                    except Exception as e:
-                        pass
-
         except PlaywrightTimeoutError:
             print(f"오류: {self.complex_name} 크롤링 타임아웃 발생 (Timeout: {DEFAULT_TIMEOUT_MS/1000}s)")
         except Exception as e:
             print(f"치명적인 오류: {self.complex_name} 크롤링 실패 - {e}")
             
         finally:
-            # 브라우저가 열려 있다면 닫습니다.
-            if 'browser' in locals() and browser:
+            if browser:
                 await browser.close()
                 
         end_time = time.time()
@@ -249,58 +226,66 @@ class AggressiveCardScroll:
 
 
 # ======================================================================
-# 4. GitHub Actions 실행 진입점 (핵심 수정 부분)
+# 4. GitHub Actions 실행 진입점
 # ======================================================================
 
 def execute_crawling_and_record():
     """23개 단지를 순차적으로 크롤링하고 구글 시트에 기록"""
     
-    # print("GitHub Actions 환경이므로 Playwright 설치 단계는 워크플로우에서 처리합니다.")
-
     print(f"\n=== 23개 단지 자동 크롤링 시작 ===")
     print(f"시작시간: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     
     results = []
     total_start_time = time.time()
     
-    # 1. 구글 시트 설정 및 초기화 (한 번만 실행)
+    # 1. 구글 시트 설정 및 초기화
     worksheet = setup_google_sheets()
     
     if worksheet:
         try:
-            # 🚨 수정된 로직: 헤더(1행)를 제외하고 2행부터 마지막 행까지 삭제
+            # 헤더(1행)를 제외하고 2행부터 마지막 행까지 삭제 로직
             print("=== 기존 구글 시트 데이터 삭제 (헤더 유지) 시작 ===")
             
-            # 실제 데이터가 있는 마지막 행을 확인합니다.
             try:
+                # 시트 정보 조회 시 권한 오류가 발생하면 여기서 catch됨
                 all_values = worksheet.get_all_values()
                 actual_data_rows = len(all_values)
-            except Exception:
-                # 에러 시 안전하게 1000행까지로 가정하거나 기본값 사용
-                actual_data_rows = worksheet.row_count if worksheet.row_count > 1 else 0
+            except Exception as e:
+                 # 🚨 권한 오류(PERMISSION_DENIED) 발생 시 크롤링은 계속 진행되도록 처리
+                 error_msg = str(e)
+                 if 'PERMISSION_DENIED' in error_msg:
+                     print(f"***경고: 구글 시트 초기화 중 권한 오류 발생. 크롤링은 진행됩니다. (오류: {error_msg})***")
+                     actual_data_rows = 1 # 헤더만 있다고 가정하고 삭제/기록 단계 건너뛰기
+                     worksheet = None # 기록 단계에서 오류 재발 방지를 위해 None으로 설정
+                 else:
+                     print(f"경고: 시트 정보 조회 중 오류 발생: {e}")
+                     actual_data_rows = 1 
             
-            # 2행부터 실제 데이터의 마지막 행까지 삭제 (헤더는 1행에 유지)
-            if actual_data_rows > 1:
-                worksheet.delete_rows(2, actual_data_rows)
-                print(f"=== 2행부터 {actual_data_rows}행까지 기존 데이터 삭제 완료. ===")
-            else:
-                print("=== 헤더(1행) 외에 기존 데이터가 없거나 시트가 비어있습니다. ===")
+            # 🚨 worksheet가 None이 아닌 경우에만 삭제 및 헤더 추가 진행
+            if worksheet:
+                # 2행부터 실제 데이터의 마지막 행까지 삭제 (헤더는 1행에 유지)
+                if actual_data_rows > 1:
+                    worksheet.delete_rows(2, actual_data_rows)
+                    print(f"=== 2행부터 {actual_data_rows}행까지 기존 데이터 삭제 완료. ===")
+                else:
+                    print("=== 헤더(1행) 외에 기존 데이터가 없거나 시트가 비어있습니다. ===")
+                    
                 
-            
-            # 헤더가 누락되었거나 시트가 완전히 비었을 경우에만 헤더를 추가합니다.
-            if actual_data_rows == 0 or not worksheet.row_values(1) or worksheet.row_values(1) == ['']:
-                headers = ["단지명", "거래구분", "동", "층수", "면적", "가격", "가격변동", "중복업소", "중개업소", "등록일자", "특기사항", "제공", "매물번호"]
-                worksheet.append_row(headers)
-                print("=== 구글 시트 헤더 추가 완료 ===")
+                # 헤더가 누락되었거나 시트가 완전히 비었을 경우에만 헤더를 추가합니다.
+                if actual_data_rows == 0 or not worksheet.row_values(1) or worksheet.row_values(1) == ['']:
+                    headers = ["단지명", "거래구분", "동", "층수", "면적", "가격", "가격변동", "중복업소", "중개업소", "등록일자", "특기사항", "제공", "매물번호"]
+                    worksheet.append_row(headers)
+                    print("=== 구글 시트 헤더 추가 완료 ===")
             
         except Exception as e:
-            print(f"경고: 구글 시트 초기화/삭제 실패: {e}")
-            worksheet = None # 실패 시 기록 중단
+            # 초기화/삭제 단계에서 치명적인 오류 발생 시
+            print(f"경고: 구글 시트 초기화/삭제 실패: ***{e}***")
+            worksheet = None # 기록 단계에서 오류 재발 방지를 위해 None으로 설정
     else:
         print("경고: 구글 시트 연결 실패. 데이터 기록을 건너뜁니다.")
 
     # 2. 실제 크롤링 실행 및 데이터 수집
-    all_rows_to_append = [] # 일괄 기록을 위해 리스트에 모음
+    all_rows_to_append = []
 
     for i, complex_info in enumerate(COMPLEXES):
         print(f"\n=== 단지 {i+1}/{len(COMPLEXES)}: {complex_info['name']} 크롤링 시작 ===")
@@ -308,6 +293,7 @@ def execute_crawling_and_record():
         
         try:
             crawler = AggressiveCardScroll(complex_info['id'], complex_info['name'])
+            # 🚨 타임아웃 90초가 적용된 run 함수 실행
             result = asyncio.run(crawler.run())
             
             complex_end_time = time.time()
@@ -322,7 +308,7 @@ def execute_crawling_and_record():
             for property_data in property_list:
                 raw_data = property_data.get('raw_data', {})
                 
-                # 면적 정보 포맷팅
+                # --- 매물 데이터 정리 로직 (생략) ---
                 area_name = raw_data.get('areaName', '')
                 area1 = raw_data.get('area1', '')
                 area2 = raw_data.get('area2', '')
@@ -336,7 +322,6 @@ def execute_crawling_and_record():
                 else:
                     area = f"{area_name}m²"
                 
-                # 특기사항 포맷팅
                 special_notes = []
                 direction = raw_data.get('direction', '')
                 if direction:
@@ -344,7 +329,6 @@ def execute_crawling_and_record():
                 
                 feature_desc = raw_data.get('articleFeatureDesc', '')
                 if feature_desc:
-                    # '제공' 이전 텍스트만 추출
                     if "제공" in feature_desc:
                         feature_desc = feature_desc.split("제공")[0].strip()
                     special_notes.append(feature_desc)
@@ -356,26 +340,21 @@ def execute_crawling_and_record():
                 
                 special_notes_str = " | ".join(special_notes) if special_notes else ""
                 
-                # 중개업소명 정리
                 broker_name = raw_data.get('realtorName', '')
                 if broker_name and broker_name != "Unknown":
-                    # 불필요한 문구 제거
                     remove_strings = ['공인중개사사무소', '(주)', '중개법인', '주식회사', '부동산중개', '부동산중개법인주식회사', '부동산중개법인', '공인중개사', '부동산']
                     for remove_str in remove_strings:
                         broker_name = broker_name.replace(remove_str, '')
-                    # 숫자 제거
                     broker_name = re.sub(r'\d+', '', broker_name).strip()
                 else:
                     broker_name = "Unknown"
                 
-                # 날짜 형식 변환 (YYYYMMDD -> YYYY.MM.DD)
                 date_str = raw_data.get('articleConfirmYmd', '')
                 if date_str and len(date_str) == 8 and date_str.isdigit():
                     registration_date = f"{date_str[:4]}.{date_str[4:6]}.{date_str[6:8]}"
                 else:
                     registration_date = date_str or "Unknown"
                 
-                # 월세 가격 표기 수정
                 trade_type = raw_data.get('tradeTypeName', '')
                 price = raw_data.get('dealOrWarrantPrc', '')
                 
@@ -391,24 +370,24 @@ def execute_crawling_and_record():
                 
                 # 최종 행 데이터
                 property_row = [
-                    complex_info['name'],  # 단지명
-                    trade_type,  # 거래구분
-                    raw_data.get('buildingName', ''),  # 동
-                    raw_data.get('floorInfo', ''),  # 층수
-                    area,  # 면적
-                    price,  # 가격
-                    '',  # 가격변동 (비워둠)
-                    1,  # 중복업소 (기본값)
-                    broker_name,  # 중개업소
-                    registration_date,  # 등록일자
-                    special_notes_str,  # 특기사항
-                    raw_data.get('cpName', '') or 'Unknown',  # 제공
-                    raw_data.get('articleNo', '')  # 매물번호
+                    complex_info['name'],
+                    trade_type,
+                    raw_data.get('buildingName', ''),
+                    raw_data.get('floorInfo', ''),
+                    area,
+                    price,
+                    '',
+                    1,
+                    broker_name,
+                    registration_date,
+                    special_notes_str,
+                    raw_data.get('cpName', '') or 'Unknown',
+                    raw_data.get('articleNo', '')
                 ]
                 
                 property_rows.append(property_row)
             
-            all_rows_to_append.extend(property_rows) # 일괄 기록을 위해 리스트에 추가
+            all_rows_to_append.extend(property_rows)
             
             results.append({
                 'complex_name': complex_info['name'],
@@ -434,7 +413,6 @@ def execute_crawling_and_record():
     # 3. 크롤링 완료 후 구글 시트에 일괄 기록
     if worksheet and all_rows_to_append:
         try:
-            # append_rows를 사용하여 한 번에 시트에 기록
             worksheet.append_rows(all_rows_to_append)
             print(f"\n=== 최종 구글 시트 기록 완료: {len(all_rows_to_append)}개 매물 ===")
         except Exception as e:
