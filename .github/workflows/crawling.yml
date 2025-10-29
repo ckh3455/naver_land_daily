@@ -27,16 +27,15 @@ jobs:
         with:
           python-version: '3.11' # 사용하시는 Python 버전에 맞게 설정
 
-      # 3. 🚨 [최종 시도] 필수 시스템 종속성 수동 설치 (libasound2 문제 회피)
+      # 3. 🚨 [최종 수정] 필수 시스템 종속성 수동 설치 (목록 최소화)
       - name: Install System Dependencies
         run: |
           # 패키지 목록 업데이트
           sudo apt-get update
           
-          # Playwright가 요구하는 핵심 라이브러리들을 명시적으로 설치
-          # libasound2는 생략하고, 필수적인 웹/UI 라이브러리만 설치합니다.
-          sudo apt-get install -y libnss3 libgbm1 libxkbcommon0 libgconf-2-4 libgtk-3-0 libnotify-dev libgconf-2-4
-          
+          # 최소한의 필수 라이브러리만 설치하여 오류 발생 가능성을 줄입니다.
+          sudo apt-get install -y libnss3 libgbm1 libxkbcommon0 libgtk-3-0 libnotify-dev
+
       # 4. Python 의존성 설치
       - name: Install Python dependencies
         run: |
@@ -46,7 +45,7 @@ jobs:
       # 5. Playwright 브라우저 파일 설치
       - name: Install Playwright Browsers
         run: |
-          # --with-deps를 제거하여 시스템 종속성 검사/설치 과정을 우회하고 브라우저 파일만 다운로드합니다.
+          # 시스템 종속성 확인 없이 브라우저 파일만 다운로드합니다.
           playwright install chromium
 
       # 6. 서비스 계정 파일 생성 (구글 시트/드라이브 접근용)
