@@ -1,7 +1,6 @@
 import asyncio
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
 import json
-from datetime import datetime
 import re
 import os
 import time
@@ -10,6 +9,9 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 import sys
+
+# 🚨 [수정]: datetime 모듈 import 누락 오류 수정
+from datetime import datetime
 
 # ======================================================================
 # 1. 상수 및 초기 설정
@@ -52,7 +54,6 @@ COMPLEXES = [
 
 def upload_to_google_drive(file_path, file_name, folder_id=None):
     """구글 드라이브에 파일 업로드 (크롤링 결과 파일 업로드용)"""
-    # GitHub Actions에서는 사용하지 않음 (로깅 목적)
     try:
         credentials = service_account.Credentials.from_service_account_file(
             'service_account.json',
@@ -122,21 +123,12 @@ def setup_google_sheets():
         print(f"구글 시트 설정 실패: {e}")
         return None
 
-# def install_playwright_browsers():
-#     """Playwright 브라우저 설치 (GitHub Actions에서는 워크플로우에서 처리)"""
-#     # 이 함수는 GitHub Actions 워크플로우에서 직접 처리하므로 주석 처리합니다.
-#     return True
-
 
 # ======================================================================
 # 3. 크롤링 핵심 로직 클래스
 # ======================================================================
 
 class AggressiveCardScroll:
-    # ... (AggressiveCardScroll 클래스 내용은 기존 main.py와 동일) ...
-    
-    # 크롤러 클래스 정의 (기존 main.py의 내용을 그대로 유지)
-    
     # URL 형식: https://new.land.naver.com/complexes/728?ms=37.525526,127.025345,16&a=A1&b=A1&e=RETAIL&g=30&p=1&rT=A1:B1:B2&wts=A&cp=Y
     BASE_URL = "https://new.land.naver.com/complexes/{complex_id}?a=A1&b=A1:B1:B2&e=RETAIL&g=30&p=1&rT=A1:B1:B2&wts=A&cp=Y"
     
@@ -177,7 +169,6 @@ class AggressiveCardScroll:
                 # 2. 크롤링 루프 (무한 스크롤)
                 properties_set = set() # 매물 번호(articleNo) 중복 제거용
                 
-                # 마지막 스크롤 높이를 추적
                 last_scroll_height = 0
                 
                 while True:
@@ -202,11 +193,9 @@ class AggressiveCardScroll:
                                     properties_set.add(article_no)
                                     newly_parsed_count += 1
                         except Exception as e:
-                            # print(f"경고: 매물 데이터 파싱 오류 - {e}")
                             continue
 
                     # 3. 스크롤 다운
-                    # 현재 스크롤 위치를 최대한 아래로 이동
                     await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
                     await page.wait_for_timeout(500) # 스크롤 후 내용 로딩 대기
 
@@ -232,16 +221,11 @@ class AggressiveCardScroll:
                         if await next_button.is_visible():
                             await next_button.click(timeout=100) # 짧은 타임아웃
                         else:
-                            # 버튼이 없거나 비활성화되면 스크롤 종료로 간주
-                            # print("-> 다음 버튼 없음/비활성화.")
                             pass
                     except PlaywrightTimeoutError:
                         pass
                     except Exception as e:
-                        # print(f"경고: 다음 버튼 클릭 오류 - {e}")
                         pass
-                        
-                    # 무한 루프 탈출 조건: 매물 개수와 스크롤 높이 변화가 없을 때
 
         except PlaywrightTimeoutError:
             print(f"오류: {self.complex_name} 크롤링 타임아웃 발생 (Timeout: {DEFAULT_TIMEOUT_MS/1000}s)")
@@ -287,26 +271,16 @@ def execute_crawling_and_record():
             # 🚨 수정된 로직: 헤더(1행)를 제외하고 2행부터 마지막 행까지 삭제
             print("=== 기존 구글 시트 데이터 삭제 (헤더 유지) 시작 ===")
             
-            # 현재 시트의 모든 행 개수를 가져옵니다.
-            # gspread의 row_count는 시트의 최대 크기를 반환할 수 있으므로, 
-            # 실제 데이터가 있는 마지막 행 번호를 찾아야 하지만, 
-            # delete_rows는 행 개수를 기준으로 동작합니다.
-            
-            # 모든 데이터를 읽어와 행 개수를 정확히 파악하는 것이 안전하지만, 
-            # 여기서는 성능을 위해 간단히 row_count를 사용합니다.
-            num_rows = worksheet.row_count
-            
-            # 실제 데이터가 있는 마지막 행을 확인하는 더 안전한 방법:
+            # 실제 데이터가 있는 마지막 행을 확인합니다.
             try:
-                # 마지막 행까지의 모든 값을 가져옵니다.
                 all_values = worksheet.get_all_values()
                 actual_data_rows = len(all_values)
             except Exception:
-                actual_data_rows = num_rows # 실패 시 기본값 사용
+                # 에러 시 안전하게 1000행까지로 가정하거나 기본값 사용
+                actual_data_rows = worksheet.row_count if worksheet.row_count > 1 else 0
             
             # 2행부터 실제 데이터의 마지막 행까지 삭제 (헤더는 1행에 유지)
             if actual_data_rows > 1:
-                # delete_rows는 첫 번째 인덱스가 시작 행, 두 번째 인덱스가 끝 행입니다.
                 worksheet.delete_rows(2, actual_data_rows)
                 print(f"=== 2행부터 {actual_data_rows}행까지 기존 데이터 삭제 완료. ===")
             else:
@@ -314,7 +288,7 @@ def execute_crawling_and_record():
                 
             
             # 헤더가 누락되었거나 시트가 완전히 비었을 경우에만 헤더를 추가합니다.
-            if actual_data_rows == 0 or not worksheet.row_values(1):
+            if actual_data_rows == 0 or not worksheet.row_values(1) or worksheet.row_values(1) == ['']:
                 headers = ["단지명", "거래구분", "동", "층수", "면적", "가격", "가격변동", "중복업소", "중개업소", "등록일자", "특기사항", "제공", "매물번호"]
                 worksheet.append_row(headers)
                 print("=== 구글 시트 헤더 추가 완료 ===")
