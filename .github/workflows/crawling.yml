@@ -1,19 +1,15 @@
 name: Naver Property Scraper
 
 # 매일 한국 시간 (KST) 오전 10시에 실행
-# UTC 01:00 = KST 10:00
 on:
-  workflow_dispatch: # 수동 실행을 위한 버튼 제공
+  workflow_dispatch:
   schedule:
-    # cron 표현식: 분 시 일 월 요일
     # 매일 01:00 UTC (한국 시간 오전 10시)
     - cron: '0 1 * * *' 
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    
-    # 크롤링은 시간이 오래 걸릴 수 있으므로 타임아웃 설정
     timeout-minutes: 30
 
     steps:
@@ -25,27 +21,28 @@ jobs:
       with:
         python-version: '3.10'
 
-    # 1. Playwright 및 시스템 종속성 설치 (오류 해결)
-    - name: 🌐 Playwright 환경 설정 및 브라우저 설치
-      uses: mxschmitt/action-playwright@v1.3 # 👈 이 액션이 이전 종속성 문제를 해결합니다.
-      with:
-        browser: 'chromium' # 필요한 브라우저만 명시하여 속도 향상
-
-    # 2. Python 라이브러리 설치
     - name: 📦 Python 의존성 설치 (requirements.txt 사용)
-      # requirements.txt에 playwright가 포함되어 있어도, 위 단계에서 시스템 종속성을 해결했으므로 문제 없습니다.
+      # 이 단계에서 Playwright Python 라이브러리(playwright==1.40.0)를 설치합니다.
       run: pip install -r requirements.txt
 
-    # 3. Google 인증 파일 생성
+    - name: 🌐 Playwright 시스템 종속성 및 브라우저 설치 (오류 해결)
+      # 1. apt 업데이트 및 Chromium 시스템 종속성 설치 (에러의 원인인 'libasound2' 관련 문제 해결)
+      # 2. 'python -m playwright install chromium' 명령어는 pip 설치 후 실행되어야 합니다.
+      run: |
+        sudo apt-get update
+        # Playwright가 요구하는 핵심 시스템 라이브러리들을 설치합니다.
+        sudo apt-get install -y libnss3 libatk-bridge2.0 libxkbcommon-0
+        # Playwright 브라우저 파일 자체를 설치합니다.
+        python -m playwright install chromium
+
     - name: 🔑 Google 서비스 계정 파일 생성
-      # GitHub Secret에 저장된 키를 이용하여 'service_account.json' 파일 생성
+      # Secret에 저장된 키를 파일로 만들어줍니다.
       env:
         GCP_SERVICE_ACCOUNT_KEY: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}
       run: echo "$GCP_SERVICE_ACCOUNT_KEY" > service_account.json
 
-    # 4. 크롤링 스크립트 실행
     - name: 🚀 네이버 부동산 크롤링 실행 및 구글 시트 기록
-      # SPREADSHEET_ID를 환경 변수로 전달하여 main.py 실행
+      # main.py 스크립트를 실행합니다.
       env:
         SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
       run: python main.py
