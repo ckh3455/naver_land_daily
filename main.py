@@ -146,21 +146,28 @@ class AggressiveCardScroll:
                 await page.goto(url, timeout=DEFAULT_TIMEOUT_MS)
                 print("DEBUG: 5. 페이지 접속 성공 (Network Idle).", flush=True)
                 
-                # 매물 리스트 영역이 나타날 때까지 대기 (타임아웃 90초 적용)
-                print("DEBUG: 6. 핵심 요소 'div.item_area' 대기 시도.", flush=True)
-                await page.wait_for_selector('div.item_area', timeout=DEFAULT_TIMEOUT_MS)
-                print("DEBUG: 7. 핵심 요소 대기 성공. 스크롤 시작 준비.", flush=True)
+                # 🚨 [핵심 수정]: 90초 동안 핵심 요소를 기다리는 코드 제거 및 5초 강제 대기
+                print("DEBUG: 6. 핵심 요소 'div.item_area' 대기 로직 제거. JavaScript 로드를 위해 5초 강제 대기 후 스크롤 진입.", flush=True)
+                await page.wait_for_timeout(5000) # 5초 강제 대기
+                print("DEBUG: 7. 5초 대기 완료. 스크롤 시작 준비.", flush=True)
                 
-                # 매물 전체 개수 파싱
-                total_text = await page.locator('div.view_info > p.summary > em').first.inner_text()
-                total_match = re.search(r'[\d,]+', total_text.replace(',', ''))
-                self.total_count = int(total_match.group(0)) if total_match else 0
+                # 매물 전체 개수 파싱 (요소가 나타나지 않을 수 있으므로, 예외 처리를 염두에 둡니다)
+                total_text_locator = page.locator('div.view_info > p.summary > em').first
+                try:
+                    total_text = await total_text_locator.inner_text(timeout=5000) # 5초 대기로 변경
+                    total_match = re.search(r'[\d,]+', total_text.replace(',', ''))
+                    self.total_count = int(total_match.group(0)) if total_match else 0
+                except PlaywrightTimeoutError:
+                    self.total_count = 0
+                    print("경고: 매물 전체 개수 요소 파싱 실패(5초 타임아웃). 0개로 설정 후 스크롤 시도.", flush=True)
+                except Exception:
+                     self.total_count = 0
                 
                 if self.total_count == 0:
-                    print(f"경고: {self.complex_name} 매물 0개 확인.", flush=True)
-                    return {'property_count': 0, 'properties': []}
-                
-                print(f"총 {self.total_count}개 매물 확인. 크롤링 시작...", flush=True)
+                    # 매물 0개로 설정되었더라도, 적극적 스크롤을 시도하여 숨겨진 매물이 있는지 확인합니다.
+                    print(f"총 매물 수 0개로 시작. 강제 스크롤 루프 진입.", flush=True)
+                else:
+                    print(f"총 {self.total_count}개 매물 확인. 크롤링 시작...", flush=True)
 
                 # 2. 크롤링 루프 (무한 스크롤)
                 properties_set = set() # 매물 번호(articleNo) 중복 제거용
@@ -221,9 +228,11 @@ class AggressiveCardScroll:
             # 🚨 타임아웃 발생 시 스크린샷 저장 로직
             try:
                 screenshot_filename = f"{self.complex_name}_TIMEOUT_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
-                await page.screenshot(path=screenshot_filename, full_page=True)
-                print(f"***오류 스크린샷 저장 완료: {screenshot_filename} (GitHub Actions 로그에서 확인)***", flush=True)
-                self.error_screenshot_path = screenshot_filename
+                # 페이지가 멈춘 상태여도 스크린샷은 시도합니다.
+                if page:
+                    await page.screenshot(path=screenshot_filename, full_page=True)
+                    print(f"***오류 스크린샷 저장 완료: {screenshot_filename} (GitHub Actions 로그에서 확인)***", flush=True)
+                    self.error_screenshot_path = screenshot_filename
             except Exception as e_shot:
                 print(f"경고: 스크린샷 캡처 실패 - {e_shot}", flush=True)
                 
