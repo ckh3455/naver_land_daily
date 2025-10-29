@@ -34,6 +34,7 @@ jobs:
           sudo apt-get update
           
           # Playwright가 요구하는 핵심 라이브러리들을 명시적으로 설치
+          # libasound2는 생략하고, 필수적인 웹/UI 라이브러리만 설치합니다.
           sudo apt-get install -y libnss3 libgbm1 libxkbcommon0 libgconf-2-4 libgtk-3-0 libnotify-dev libgconf-2-4
           
       # 4. Python 의존성 설치
@@ -45,7 +46,7 @@ jobs:
       # 5. Playwright 브라우저 파일 설치
       - name: Install Playwright Browsers
         run: |
-          # --with-deps를 제거하고, 시스템 종속성 오류를 완전히 우회합니다.
+          # --with-deps를 제거하여 시스템 종속성 검사/설치 과정을 우회하고 브라우저 파일만 다운로드합니다.
           playwright install chromium
 
       # 6. 서비스 계정 파일 생성 (구글 시트/드라이브 접근용)
