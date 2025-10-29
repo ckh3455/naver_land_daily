@@ -130,14 +130,26 @@ class AggressiveCardScroll:
         browser = None
         try:
             async with async_playwright() as p:
-                # 🚨 로그 강제 출력 (flush=True) 적용
-                print("DEBUG: 1. Playwright 시작 및 Chromium 브라우저 실행 시도...", flush=True)
-                # 이 부분이 90초를 초과하면 TimeoutError가 발생해야 합니다.
-                browser = await p.chromium.launch(headless=True, timeout=DEFAULT_TIMEOUT_MS) 
-                print("DEBUG: 2. Chromium 브라우저 실행 성공.", flush=True)
+                # 🚨 [수정]: User-Agent를 명시적으로 설정하여 봇 감지 우회 시도
+                user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'
                 
-                page = await browser.new_page()
-                print("DEBUG: 3. 새 페이지 생성 완료.", flush=True)
+                print("DEBUG: 1. Playwright 시작 및 Chromium 브라우저 실행 시도...", flush=True)
+                browser = await p.chromium.launch(
+                    headless=True, 
+                    timeout=DEFAULT_TIMEOUT_MS,
+                    args=[f'--user-agent={user_agent}'] # User-Agent 인자 추가
+                ) 
+                print("DEBUG: 2. Chromium 브라우저 실행 성공. (User-Agent 설정 완료)", flush=True)
+                
+                # 🚨 [수정]: Context를 생성하고 추가 HTTP 헤더 설정 (Referer, Accept-Language)
+                context = await browser.new_context(
+                    extra_http_headers={
+                        'Referer': 'https://www.naver.com/', # 네이버 메인에서 온 것처럼
+                        'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7' # 한국어 선호 설정
+                    }
+                )
+                page = await context.new_page() # Context로 페이지 생성
+                print("DEBUG: 3. 새 페이지 생성 완료. (HTTP 헤더 설정 완료)", flush=True)
                 
                 url = self.BASE_URL.format(complex_id=self.complex_id)
                 
@@ -146,15 +158,16 @@ class AggressiveCardScroll:
                 await page.goto(url, timeout=DEFAULT_TIMEOUT_MS)
                 print("DEBUG: 5. 페이지 접속 성공 (Network Idle).", flush=True)
                 
-                # 🚨 [핵심 수정]: 90초 동안 핵심 요소를 기다리는 코드 제거 및 5초 강제 대기
+                # 핵심 요소 'div.item_area' 대기 로직 제거 후 5초 강제 대기
                 print("DEBUG: 6. 핵심 요소 'div.item_area' 대기 로직 제거. JavaScript 로드를 위해 5초 강제 대기 후 스크롤 진입.", flush=True)
                 await page.wait_for_timeout(5000) # 5초 강제 대기
                 print("DEBUG: 7. 5초 대기 완료. 스크롤 시작 준비.", flush=True)
                 
-                # 매물 전체 개수 파싱 (요소가 나타나지 않을 수 있으므로, 예외 처리를 염두에 둡니다)
+                # 매물 전체 개수 파싱
                 total_text_locator = page.locator('div.view_info > p.summary > em').first
                 try:
-                    total_text = await total_text_locator.inner_text(timeout=5000) # 5초 대기로 변경
+                    # 매물 수 파싱도 5초 내에 이루어져야 합니다.
+                    total_text = await total_text_locator.inner_text(timeout=5000)
                     total_match = re.search(r'[\d,]+', total_text.replace(',', ''))
                     self.total_count = int(total_match.group(0)) if total_match else 0
                 except PlaywrightTimeoutError:
@@ -164,7 +177,6 @@ class AggressiveCardScroll:
                      self.total_count = 0
                 
                 if self.total_count == 0:
-                    # 매물 0개로 설정되었더라도, 적극적 스크롤을 시도하여 숨겨진 매물이 있는지 확인합니다.
                     print(f"총 매물 수 0개로 시작. 강제 스크롤 루프 진입.", flush=True)
                 else:
                     print(f"총 {self.total_count}개 매물 확인. 크롤링 시작...", flush=True)
@@ -228,7 +240,6 @@ class AggressiveCardScroll:
             # 🚨 타임아웃 발생 시 스크린샷 저장 로직
             try:
                 screenshot_filename = f"{self.complex_name}_TIMEOUT_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
-                # 페이지가 멈춘 상태여도 스크린샷은 시도합니다.
                 if page:
                     await page.screenshot(path=screenshot_filename, full_page=True)
                     print(f"***오류 스크린샷 저장 완료: {screenshot_filename} (GitHub Actions 로그에서 확인)***", flush=True)
