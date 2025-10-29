@@ -5,14 +5,13 @@ on:
     branches:
       - master
   schedule:
-    # 매일 한국 시간 새벽 5시 (UTC 20:00)에 실행
     - cron: '0 20 * * *' 
   workflow_dispatch:
 
 jobs:
   run_crawler:
-    # Playwright의 리눅스 종속성을 위해 ubuntu-latest 사용
-    runs-on: ubuntu-latest
+    # 🚨 수정: 안정적인 실행을 위해 ubuntu-22.04로 고정
+    runs-on: ubuntu-22.04 
 
     steps:
       - name: Checkout repository
@@ -21,47 +20,36 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10' # 안정적인 버전 사용
+          python-version: '3.10'
 
       - name: Install Dependencies
         run: |
           pip install -r requirements.txt
           
-      # 🚨 핵심 수정 1: Playwright 실행에 필요한 시스템 라이브러리 설치
-      - name: Install System Dependencies
+      # 🚨 핵심 수정: 시스템 종속성 설치 (IPv4 강제 + 패키지명 수정)
+      - name: Install System Dependencies with IPv4
+        # 🚨 env 블록으로 apt-get에 IPv4 강제 적용
+        env:
+          APT_LISTCHANGES_FRONTEND: none
+          # apt-get이 IPv4로 연결을 시도하도록 강제
+          ACQUIRE_FORCE_IPV4: true 
         run: |
           sudo apt-get update
-          # Playwright Chromium 실행에 필수적인 라이브러리
-          sudo apt-get install -y libnss3 libgbm1 libasound6 libdbus-1-3
+          # libasound6 대신 일반적으로 사용되는 libasound2를 설치
+          sudo apt-get install -y libnss3 libgbm1 libasound2 libdbus-1-3
 
-      # 🚨 핵심 수정 2: IPv4 우선순위 환경 변수 설정
-      # 이 Step에서 Node.js/Playwright의 네트워크 연결을 IPv4로 강제합니다.
+      # 🚨 핵심 수정: Playwright Browsers 설치 (IPv4 강제)
       - name: Install Playwright Browsers 🚀
-        # 🚨 env 블록을 사용하여 환경 변수를 이 Step에 직접 적용
         env:
           # Node.js (Playwright 내부)가 DNS 쿼리 시 IPv4를 우선하도록 강제
-          NODE_OPTIONS: --dns-result-order=ipv4first
-          # 다운로드 호스트를 명시하여 확실하게 IPv4 경로를 타도록 유도
+          NODE_OPTIONS: --dns-result-order=ipv4first 
           PLAYWRIGHT_DOWNLOAD_HOST: playwright.azureedge.net
-          # Playwright 설치 명령어 실행
         run: |
           python3 -m playwright install chromium
 
+      # ... (나머지 Run Crawler Script 등은 그대로 유지)
       - name: Run Crawler Script
-        # 이전에 기록했던 main.py 실행 로직을 여기에 넣습니다.
         run: |
-          # Cloud Function Entrypoint에 'start' 액션 POST 요청
-          # (GitHub Actions에서 직접 실행할 때는 로컬 Python 스크립트 실행으로 대체하는 것이 일반적입니다.)
-          # 클라우드 함수 환경이 아닌 GitHub Actions에서 직접 실행하는 코드로 가정합니다.
           python3 main.py
         env:
-          # 필요한 Secret 환경 변수를 GitHub Secrets에서 가져옵니다.
-          # 예시: 구글 시트 ID
           SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
-          # 서비스 계정 JSON 파일을 환경 변수/파일로 처리하는 로직 추가 필요
-          # 예를 들어, JSON 내용을 파일로 저장하는 로직을 추가할 수 있습니다.
-          # SERVICE_ACCOUNT_JSON: ${{ secrets.SERVICE_ACCOUNT_JSON }} 
-          
-      - name: Upload results to Google Drive (Optional)
-        # 구글 드라이브 업로드 로직이 있다면 여기에 추가
-        run: echo "Upload step placeholder"
