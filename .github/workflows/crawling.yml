@@ -1,6 +1,7 @@
 name: Naver Property Scraper
 
-# 정해진 시간에 실행 (예: 매일 UTC 기준 새벽 1시, 한국시간 오전 10시)
+# 매일 한국 시간 (KST) 오전 10시에 실행
+# UTC 01:00 = KST 10:00
 on:
   workflow_dispatch: # 수동 실행을 위한 버튼 제공
   schedule:
@@ -24,19 +25,25 @@ jobs:
       with:
         python-version: '3.10'
 
-    - name: 📦 의존성 설치 (requirements.txt 사용)
+    # 1. Playwright 및 시스템 종속성 설치 (오류 해결)
+    - name: 🌐 Playwright 환경 설정 및 브라우저 설치
+      uses: mxschmitt/action-playwright@v1.3 # 👈 이 액션이 이전 종속성 문제를 해결합니다.
+      with:
+        browser: 'chromium' # 필요한 브라우저만 명시하여 속도 향상
+
+    # 2. Python 라이브러리 설치
+    - name: 📦 Python 의존성 설치 (requirements.txt 사용)
+      # requirements.txt에 playwright가 포함되어 있어도, 위 단계에서 시스템 종속성을 해결했으므로 문제 없습니다.
       run: pip install -r requirements.txt
 
-    - name: 🌐 Playwright 브라우저 설치 (Chromium)
-      # 크롤링에 필수적인 Playwright 브라우저를 설치합니다.
-      run: python -m playwright install chromium --with-deps
-
+    # 3. Google 인증 파일 생성
     - name: 🔑 Google 서비스 계정 파일 생성
-      # GitHub Secret에 저장된 인증 정보를 파일로 만듭니다. (main.py에서 service_account.json으로 읽음)
+      # GitHub Secret에 저장된 키를 이용하여 'service_account.json' 파일 생성
       env:
         GCP_SERVICE_ACCOUNT_KEY: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}
       run: echo "$GCP_SERVICE_ACCOUNT_KEY" > service_account.json
 
+    # 4. 크롤링 스크립트 실행
     - name: 🚀 네이버 부동산 크롤링 실행 및 구글 시트 기록
       # SPREADSHEET_ID를 환경 변수로 전달하여 main.py 실행
       env:
