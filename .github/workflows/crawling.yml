@@ -1,0 +1,45 @@
+name: Naver Property Scraper
+
+# 정해진 시간에 실행 (예: 매일 UTC 기준 새벽 1시, 한국시간 오전 10시)
+on:
+  workflow_dispatch: # 수동 실행을 위한 트리거
+  schedule:
+    # cron 표현식 사용: 분 시 일 월 요일
+    # 예: 매일 01:00 UTC (새벽 1시) = KST 10:00 (오전 10시)
+    - cron: '0 1 * * *' 
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    
+    # 크롤링을 위한 타임아웃 설정 (필요 시)
+    timeout-minutes: 30
+
+    steps:
+    - name: ⬇️ 코드 체크아웃
+      uses: actions/checkout@v4
+
+    - name: 🐍 Python 3.10 설정
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+
+    - name: 📦 의존성 설치 (requirements.txt 사용)
+      run: pip install -r requirements.txt
+
+    - name: 🌐 Playwright 브라우저 설치 (Chromium)
+      # 크롤링에 필수적인 Playwright 브라우저를 설치합니다.
+      run: python -m playwright install chromium
+
+    - name: 🔑 Google 서비스 계정 파일 생성
+      # GitHub Secret에 저장된 인증 정보를 파일로 만듭니다.
+      # main.py에서 'service_account.json'으로 읽습니다.
+      env:
+        GCP_SERVICE_ACCOUNT_KEY: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}
+      run: echo "$GCP_SERVICE_ACCOUNT_KEY" > service_account.json
+
+    - name: 🚀 네이버 부동산 크롤링 실행 및 구글 시트 기록
+      # main.py 파일을 직접 실행합니다. SPREADSHEET_ID는 Secret에서 환경 변수로 전달됩니다.
+      env:
+        SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
+      run: python main.py
