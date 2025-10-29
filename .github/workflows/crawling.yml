@@ -22,16 +22,31 @@ jobs:
         python-version: '3.10'
 
     - name: 📦 Python 의존성 설치 (requirements.txt 사용)
-      # 이 단계에서 Playwright Python 라이브러리(playwright==1.40.0)를 설치합니다.
+      # 이 단계에서 Playwright Python 라이브러리를 설치합니다.
       run: pip install -r requirements.txt
 
-    - name: 🌐 Playwright 시스템 종속성 및 브라우저 설치 (오류 해결)
-      # 1. apt 업데이트 및 Chromium 시스템 종속성 설치 (에러의 원인인 'libasound2' 관련 문제 해결)
-      # 2. 'python -m playwright install chromium' 명령어는 pip 설치 후 실행되어야 합니다.
+    - name: 🌐 Playwright 시스템 종속성 및 브라우저 설치 (최종 오류 해결)
+      # Playwright Chromium 실행에 필수적인 시스템 라이브러리 설치를 시도합니다.
+      # 오류 방지를 위해 패키지 이름과 설치 명령을 현재 환경에 맞게 조정합니다.
       run: |
+        echo "Updating apt cache..."
         sudo apt-get update
-        # Playwright가 요구하는 핵심 시스템 라이브러리들을 설치합니다.
-        sudo apt-get install -y libnss3 libatk-bridge2.0 libxkbcommon-0
+        
+        echo "Installing core system dependencies for Chromium..."
+        # Playwright 공식 문서 기반의 핵심 라이브러리 목록
+        sudo apt-get install -y --no-install-recommends \
+          libnss3 \
+          libatk-bridge2.0-0 \
+          libxkbcommon0 \
+          libgtk-3-0 \
+          libgbm1 \
+          libasound2 \
+          libxdamage1 \
+          libpangocairo-1.0-0 \
+          libu2f-udev \
+          libvulkan1
+        
+        echo "Installing Playwright Chromium browser..."
         # Playwright 브라우저 파일 자체를 설치합니다.
         python -m playwright install chromium
 
