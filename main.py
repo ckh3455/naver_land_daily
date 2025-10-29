@@ -18,7 +18,7 @@ from datetime import datetime
 # ======================================================================
 
 # Playwright 기본 타임아웃 설정 (15초)
-DEFAULT_TIMEOUT_MS = 15000 
+DEFAULT_TIMEOUT_MS = 60000 
 
 # 네이버 부동산 단지 목록 (총 23개) - 이 부분은 기존 파일의 목록을 유지합니다.
 COMPLEXES = [
