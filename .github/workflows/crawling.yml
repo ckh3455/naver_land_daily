@@ -4,7 +4,6 @@ name: Naver Property Scraper
 on:
   workflow_dispatch:
   schedule:
-    # 매일 01:00 UTC (한국 시간 오전 10시)
     - cron: '0 1 * * *' 
 
 jobs:
@@ -21,43 +20,39 @@ jobs:
       with:
         python-version: '3.10'
 
-    - name: 📦 Python 의존성 설치 (requirements.txt 사용)
-      # 이 단계에서 Playwright Python 라이브러리를 설치합니다.
+    - name: 📦 Python 의존성 설치
       run: pip install -r requirements.txt
 
-    - name: 🌐 Playwright 시스템 종속성 및 브라우저 설치 (최종 오류 해결)
-      # Playwright Chromium 실행에 필수적인 시스템 라이브러리 설치를 시도합니다.
-      # 오류 방지를 위해 패키지 이름과 설치 명령을 현재 환경에 맞게 조정합니다.
+    - name: 🌐 Playwright 시스템 종속성 및 브라우저 설치 (오류 우회 해결)
+      # libasound2 문제 및 기타 종속성 문제를 우회하고 브라우저를 설치합니다.
       run: |
-        echo "Updating apt cache..."
+        echo "Updating apt cache and installing core dependencies..."
         sudo apt-get update
         
-        echo "Installing core system dependencies for Chromium..."
-        # Playwright 공식 문서 기반의 핵심 라이브러리 목록
+        # APT 설치 실패 시에도 다음 명령어를 진행하도록 '|| true' 추가
+        # libasound2 대신 libasound2t64 설치 시도 및 기타 필수 패키지 설치
         sudo apt-get install -y --no-install-recommends \
           libnss3 \
           libatk-bridge2.0-0 \
           libxkbcommon0 \
           libgtk-3-0 \
           libgbm1 \
-          libasound2 \
+          libasound2t64 \
           libxdamage1 \
           libpangocairo-1.0-0 \
           libu2f-udev \
-          libvulkan1
+          libvulkan1 || true
         
         echo "Installing Playwright Chromium browser..."
-        # Playwright 브라우저 파일 자체를 설치합니다.
+        # Playwright 브라우저 설치 (시스템 종속성이 부족해도 자체 설치 시도)
         python -m playwright install chromium
 
     - name: 🔑 Google 서비스 계정 파일 생성
-      # Secret에 저장된 키를 파일로 만들어줍니다.
       env:
         GCP_SERVICE_ACCOUNT_KEY: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}
       run: echo "$GCP_SERVICE_ACCOUNT_KEY" > service_account.json
 
     - name: 🚀 네이버 부동산 크롤링 실행 및 구글 시트 기록
-      # main.py 스크립트를 실행합니다.
       env:
         SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
       run: python main.py
