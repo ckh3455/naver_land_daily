@@ -15,6 +15,9 @@ jobs:
     # 타임존을 한국 시간으로 설정 (로그 시간 확인 용이)
     env:
       TZ: Asia/Seoul
+      # 🚨 핵심: IPv6 연결 오류를 우회하기 위해 IPv4만 사용하도록 강제합니다.
+      NODE_OPTIONS: --dns-result-order=ipv4first
+      NODE_NO_WARNINGS: 1
 
     steps:
       # 1. 코드 체크아웃
@@ -25,9 +28,9 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11' # 사용하시는 Python 버전에 맞게 설정
+          python-version: '3.11'
 
-      # 3. 🚨 [최종 수정] 필수 시스템 종속성 수동 설치 (목록 최소화)
+      # 3. 필수 시스템 종속성 수동 설치
       - name: Install System Dependencies
         run: |
           # 패키지 목록 업데이트
@@ -63,6 +66,6 @@ jobs:
       - name: Upload Screenshots as Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: crawl-screenshots-${{ github.sha }}  # 아티팩트 이름
-          path: '*.png' # 현재 디렉토리에 있는 모든 PNG 파일을 수집하여 업로드합니다.
-          retention-days: 7 # 7일간 보관
+          name: crawl-screenshots-${{ github.sha }}
+          path: '*.png'
+          retention-days: 7
