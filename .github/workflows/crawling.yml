@@ -27,31 +27,39 @@ jobs:
         with:
           python-version: '3.11' # 사용하시는 Python 버전에 맞게 설정
 
-      # 3. 의존성 설치 및 Playwright 브라우저 설치 (🚨 libasound2 오류 해결 로직)
-      - name: Install dependencies and Playwright Browsers
+      # 3. 🚨 [최종 시도] 필수 시스템 종속성 수동 설치 (libasound2 문제 회피)
+      - name: Install System Dependencies
+        run: |
+          # 패키지 목록 업데이트
+          sudo apt-get update
+          
+          # Playwright가 요구하는 핵심 라이브러리들을 명시적으로 설치
+          sudo apt-get install -y libnss3 libgbm1 libxkbcommon0 libgconf-2-4 libgtk-3-0 libnotify-dev libgconf-2-4
+          
+      # 4. Python 의존성 설치
+      - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          
-          # 시스템 패키지 목록을 최신화하고, Playwright 실행에 필요한 핵심 라이브러리(libgbm1)를 수동으로 설치
-          sudo apt-get update
-          sudo apt-get install -y libgbm1
-          
-          # --force 플래그를 사용하여 종속성 누락 오류(libasound2)를 무시하고 Chromium을 설치합니다.
-          playwright install chromium --with-deps --force
 
-      # 4. 서비스 계정 파일 생성 (구글 시트/드라이브 접근용)
+      # 5. Playwright 브라우저 파일 설치
+      - name: Install Playwright Browsers
+        run: |
+          # --with-deps를 제거하고, 시스템 종속성 오류를 완전히 우회합니다.
+          playwright install chromium
+
+      # 6. 서비스 계정 파일 생성 (구글 시트/드라이브 접근용)
       - name: Create service_account.json
         run: |
           echo "${{ secrets.SERVICE_ACCOUNT_JSON }}" > service_account.json
         env:
           SERVICE_ACCOUNT_JSON: ${{ secrets.SERVICE_ACCOUNT_JSON }}
 
-      # 5. 크롤러 스크립트 실행
+      # 7. 크롤러 스크립트 실행
       - name: Run Crawler Script
         run: python main.py
 
-      # 6. 스크린샷 파일을 아티팩트로 업로드 
+      # 8. 스크린샷 파일을 아티팩트로 업로드 
       - name: Upload Screenshots as Artifact
         uses: actions/upload-artifact@v4
         with:
