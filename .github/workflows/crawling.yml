@@ -2,8 +2,8 @@ name: 네이버 부동산 크롤링
 
 on:
   schedule:
-    # 매일 오전 9시 (한국 시간) = UTC 0시
-    - cron: '0 0 * * *'
+    # 매일 오전 3시 (한국 시간) = UTC 18시
+    - cron: '0 18 * * *'
   workflow_dispatch:  # 수동 실행 버튼
 
 jobs:
