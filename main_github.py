@@ -78,6 +78,10 @@ def setup_google_sheets():
         )
         debug_log("서비스 계정 인증 완료", "SUCCESS")
         
+        # 실제 사용 중인 서비스 계정 이메일 출력
+        service_email = credentials.service_account_email
+        debug_log(f"🔑 사용 중인 서비스 계정: {service_email}", "INFO")
+        
         debug_log("gspread 클라이언트 생성 중...", "DEBUG")
         gc = gspread.authorize(credentials)
         debug_log("gspread 클라이언트 생성 완료", "SUCCESS")
@@ -510,9 +514,9 @@ async def main():
     
     # 기존 데이터 삭제 및 헤더 추가
     debug_log("=== 2단계: 시트 초기화 ===", "STEP")
-    debug_log("기존 데이터 삭제 건너뛰기 (임시)...", "WARNING")
-    # worksheet.clear()  # 임시로 주석 처리 - 권한 문제 해결 후 활성화
-    # debug_log("기존 데이터 삭제 완료", "SUCCESS")
+    debug_log("기존 데이터 삭제 중...", "DEBUG")
+    worksheet.clear()
+    debug_log("기존 데이터 삭제 완료", "SUCCESS")
     
     headers = ["단지명", "거래구분", "동", "층수", "면적", "가격", "가격변동", 
                "중복업소", "중개업소", "등록일자", "특기사항", "제공", "매물번호"]
