@@ -32,7 +32,11 @@ jobs:
     
     - name: 서비스 계정 키 생성
       run: |
-        echo '${{ secrets.SERVICE_ACCOUNT_JSON }}' > service_account.json
+        cat << 'EOF' > service_account.json
+        ${{ secrets.SERVICE_ACCOUNT_JSON }}
+        EOF
+        echo "서비스 계정 파일 생성 완료"
+        ls -lh service_account.json
     
     - name: 크롤링 실행
       env:
