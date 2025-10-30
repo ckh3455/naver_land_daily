@@ -8,7 +8,7 @@ on:
 
 jobs:
   crawl:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04  # Ubuntu 22.04로 고정 (Playwright 호환성)
     timeout-minutes: 60  # 최대 1시간
     
     steps:
