@@ -358,8 +358,8 @@ class AggressiveCardScroll:
             
             debug_log(f"총 API 응답: {len(self.api_responses)}개", "INFO")
             
-            # 5번 연속 변화 없으면 중단
-            if consecutive_no_change >= 5:
+            # 3번 연속 변화 없으면 중단
+            if consecutive_no_change >= 3:
                 debug_log(f"⏹️  연속 {consecutive_no_change}회 변화 없음. 스크롤 종료", "INFO")
                 break
             
