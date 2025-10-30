@@ -1,56 +1,183 @@
-# 🏠 네이버 부동산 매물 크롤링 자동화 (GitHub Actions)
+# 🏢 네이버 부동산 크롤러 (GitHub Actions)
 
-이 프로젝트는 Playwright와 Python을 사용하여 네이버 부동산의 지정된 단지 매물 정보를 주기적으로 크롤링하고, 그 결과를 **Google Sheets**에 자동 기록하는 GitHub Actions 워크플로우입니다.
+매일 자동으로 23개 아파트 단지의 매물 정보를 수집하여 Google Sheets에 기록하는 크롤러입니다.
 
-기존 Google Cloud Scheduler 환경에서 GitHub Actions 환경으로 전환하여, 별도의 서버 관리 없이 스케줄링된 작업을 수행합니다.
+## 📋 기능
 
-## ⚙️ 설정 및 배포 전 준비 사항
+- 🤖 **자동 스케줄링**: 매일 오전 9시(한국 시간) 자동 실행
+- 🖱️ **수동 실행**: GitHub Actions 페이지에서 버튼 클릭으로 즉시 실행
+- 📊 **Google Sheets 연동**: 크롤링 결과를 자동으로 스프레드시트에 기록
+- 🏘️ **23개 단지 지원**: 미성, 현대, 한양, 대림 등 23개 아파트 단지
+- 💾 **결과 저장**: JSON 형태로 크롤링 결과 아티팩트 저장
 
-이 워크플로우를 성공적으로 실행하기 위해서는 **Google Sheets 연동 인증** 설정이 필수입니다.
+## 🚀 설정 방법
 
-### 1. Google Sheets 및 서비스 계정 준비
+### 1️⃣ Google Cloud 설정
 
-1.  **서비스 계정 키 (JSON) 준비:** Google Cloud에서 서비스 계정을 생성하고, 키를 **JSON 형식**으로 다운로드합니다. 이 파일이 **`service_account.json`**에 해당합니다.
-2.  **스프레드시트 공유:** 데이터를 기록할 Google Sheets에 서비스 계정 이메일 주소(`[계정명]@[프로젝트-id].iam.gserviceaccount.com`)를 **편집자** 권한으로 공유합니다.
-3.  **스프레드시트 ID 확인:** Google Sheets URL에서 ID를 복사합니다. (예: `https://docs.google.com/spreadsheets/d/`**`1QP56lm5kPB...`**`/edit`)
+#### 서비스 계정 생성
+1. [Google Cloud Console](https://console.cloud.google.com) 접속
+2. 프로젝트 생성 또는 선택
+3. **IAM 및 관리자** → **서비스 계정** 이동
+4. **서비스 계정 만들기** 클릭
+5. 서비스 계정 이름 입력 (예: `naver-crawler`)
+6. **완료** 클릭
 
-### 2. GitHub Secrets 설정
+#### 서비스 계정 키 생성
+1. 생성된 서비스 계정 클릭
+2. **키** 탭 → **키 추가** → **새 키 만들기**
+3. **JSON** 선택 후 **만들기**
+4. 다운로드된 JSON 파일 내용 복사 (나중에 사용)
 
-다운로드한 JSON 키와 스프레드시트 ID를 GitHub 저장소의 Secret으로 등록해야 합니다.
+#### Google Sheets API 활성화
+1. **API 및 서비스** → **라이브러리** 이동
+2. "Google Sheets API" 검색 후 **사용 설정** 클릭
 
-1.  저장소 **Settings** $\rightarrow$ **Security** $\rightarrow$ **Secrets and variables** $\rightarrow$ **Actions**로 이동합니다.
-2.  다음 이름으로 **New repository secret**을 생성합니다.
+### 2️⃣ Google Sheets 준비
 
-| Secret 이름 | 값 내용 | 설명 |
-| :--- | :--- | :--- |
-| `GCP_SERVICE_ACCOUNT_KEY` | `service_account.json` 파일의 **전체 내용** (JSON 문자열) | Google Sheets 인증에 사용 |
-| `SPREADSHEET_ID` | 데이터를 기록할 Google Sheets의 **스프레드시트 ID** | 크롤링 결과가 기록될 대상 시트의 ID |
+1. [Google Sheets](https://sheets.google.com) 에서 새 스프레드시트 생성
+2. 스프레드시트 URL에서 ID 복사
+   - URL: `https://docs.google.com/spreadsheets/d/[SPREADSHEET_ID]/edit`
+   - `[SPREADSHEET_ID]` 부분이 스프레드시트 ID
+3. **공유** 버튼 클릭
+4. 서비스 계정 이메일 주소를 **편집자** 권한으로 추가
+   - 이메일: `your-service-account@project-id.iam.gserviceaccount.com`
+
+### 3️⃣ GitHub Repository 설정
+
+#### Secrets 추가
+1. GitHub 저장소 → **Settings** → **Secrets and variables** → **Actions**
+2. **New repository secret** 클릭
+3. 다음 2개의 secret 추가:
+
+**SECRET 1: SERVICE_ACCOUNT_JSON**
+- Name: `SERVICE_ACCOUNT_JSON`
+- Value: 다운로드한 서비스 계정 JSON 파일 전체 내용
+```json
+{
+  "type": "service_account",
+  "project_id": "your-project",
+  "private_key_id": "...",
+  "private_key": "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n",
+  ...
+}
+```
+
+**SECRET 2: SPREADSHEET_ID**
+- Name: `SPREADSHEET_ID`
+- Value: Google Sheets 스프레드시트 ID
+```
+1QP56lm5kPBdsUhrgcgY2U-JdmukXIkKCSxefd1QExKE
+```
+
+### 4️⃣ 파일 구조
+
+```
+.
+├── .github/
+│   └── workflows/
+│       └── naver-crawling.yml    # GitHub Actions 워크플로우
+├── main_github.py                # 메인 크롤링 스크립트
+├── requirements.txt              # Python 의존성
+└── README.md                     # 이 파일
+```
+
+## ▶️ 실행 방법
+
+### 자동 실행
+- 매일 오전 9시(한국 시간)에 자동으로 실행됩니다.
+
+### 수동 실행
+1. GitHub 저장소 → **Actions** 탭
+2. 왼쪽에서 **네이버 부동산 크롤링** 선택
+3. **Run workflow** 버튼 클릭
+4. **Run workflow** 확인
+
+### 로컬 실행 (테스트용)
+```bash
+# 의존성 설치
+pip install -r requirements.txt
+playwright install chromium
+
+# 서비스 계정 키 파일 생성
+echo '{ ... }' > service_account.json
+
+# 환경 변수 설정
+export SPREADSHEET_ID="your-spreadsheet-id"
+
+# 실행
+python main_github.py
+```
+
+## 📊 결과 확인
+
+### Google Sheets
+- 설정한 스프레드시트의 "네이버 매물분석" 탭에서 확인
+- 자동으로 헤더와 데이터가 추가됩니다
+
+### GitHub Actions
+- **Actions** 탭에서 실행 로그 확인
+- 완료된 워크플로우에서 `crawling-results` 아티팩트 다운로드 가능
+
+## 📝 수집 데이터 항목
+
+| 항목 | 설명 |
+|------|------|
+| 단지명 | 아파트 단지 이름 |
+| 거래구분 | 매매/전세/월세 |
+| 동 | 동 번호 |
+| 층수 | 층 정보 |
+| 면적 | 전용/공급 면적 |
+| 가격 | 거래 가격 |
+| 중개업소 | 등록 부동산 |
+| 등록일자 | 매물 등록일 |
+| 특기사항 | 방향, 태그 등 |
+| 제공 | 정보 제공처 |
+| 매물번호 | 네이버 매물 번호 |
+
+## 🏘️ 지원 단지 목록
+
+총 23개 단지:
+- 미성1차, 미성2차
+- 신현대
+- 현대1~8차, 현대10,13,14차, 현대65동, 현대빌라트
+- 한양1~8차
+- 대림빌라트
+- 트리마제
+- 메이플자이
+
+## ⚠️ 주의사항
+
+1. **Rate Limit**: 네이버 API 호출 제한으로 일부 단지가 실패할 수 있습니다.
+2. **실행 시간**: 전체 크롤링은 약 10~15분 소요됩니다.
+3. **GitHub Actions 제한**: 
+   - Public 저장소: 무제한
+   - Private 저장소: 월 2,000분 무료
+4. **서비스 계정 키 보안**: 
+   - 절대 코드에 직접 포함하지 마세요
+   - GitHub Secrets만 사용하세요
+
+## 🔧 문제 해결
+
+### "구글 시트 연결 실패"
+- Secrets이 올바르게 설정되었는지 확인
+- 서비스 계정에 스프레드시트 편집 권한이 있는지 확인
+
+### "Playwright 브라우저 실행 실패"
+- workflow 파일의 `playwright install-deps` 명령이 있는지 확인
+
+### "Rate exceeded" 오류
+- 네이버 API 제한으로 정상적인 현상입니다
+- 다음 실행 시 다시 시도됩니다
+
+## 📜 라이선스
+
+MIT License
+
+## 🤝 기여
+
+이슈와 PR은 언제나 환영합니다!
 
 ---
 
-## 🛠️ 핵심 파일 수정 (매우 중요)
-
-GitHub Actions에서 스크립트 실행을 위해 **`main.py`** 파일의 코드를 반드시 수정해야 합니다.
-
-### `main.py` 수정 내용
-
-`main.py` 파일의 가장 하단에 있던 `@functions_framework.http` 데코레이터가 붙은 Cloud Function 진입점 함수를 제거하고, 스크립트 직접 실행을 위한 코드로 대체해야 합니다.
-
-**✅ 수정 요약:**
-
-1.  `functions_framework` 관련 모든 코드를 제거합니다.
-2.  Cloud Function 내부의 `action == 'start'` 로직을 분리하여 `execute_crawling_and_record()`와 같은 독립적인 함수로 만듭니다. (이전 답변에서 제공된 수정 가이드 참고)
-3.  파일 최하단에 스크립트 실행 진입점을 추가합니다.
-
-```python
-# main.py 파일 최하단에 추가 (또는 기존 Cloud Function Entry Point를 대체)
-
-def execute_crawling_and_record():
-    # ... (기존 크롤링 및 구글 시트 기록 로직) ...
-    pass 
-
-if __name__ == "__main__":
-    # 요청을 처리하는 로직 대신, 크롤링 실행 함수를 직접 호출
-    print("=== GitHub Actions 크롤링 스크립트 시작 ===")
-    execute_crawling_and_record()
-    print("=== GitHub Actions 크롤링 스크립트 완료 ===")
+**제작**: [Your Name]  
+**최종 수정**: 2025-10-30
