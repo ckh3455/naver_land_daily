@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """
 GitHub Actions용 네이버 부동산 크롤러 (최종 통합 버전)
-- '인증광고' (tradeCheckedByOwner) 표기 로직 최적화 및 보강 완료.
+- '집주인' (verificationTypeCode: OWNER) 식별
+- '경도', '위도' 기록
+- '인증광고' (tradeCheckedByOwner: True, 'True', 'Y', '1' 등) 표기 로직 확장
+- 각 단지 완료 시 Google Sheet에 즉시 기록
+- 총 17개 열
 """
 
 import asyncio
@@ -296,7 +300,7 @@ class AggressiveCardScroll:
 
 
 def format_property_data(property_data):
-    """매물 데이터 포맷팅 ('인증광고' 열 표기 로직 보강)"""
+    """매물 데이터 포맷팅 ('인증광고' 열 표기 로직 최적화)"""
     raw_data = property_data.get('raw_data', {})
     
     # 면적 정보 (생략)
@@ -365,12 +369,12 @@ def format_property_data(property_data):
     longitude = raw_data.get('longitude', '')
     latitude = raw_data.get('latitude', '')
     
-    # ⭐ [수정된 로직] "인증광고" 열 데이터 생성 (문자열 'True' 또는 Boolean True 모두 처리)
+    # ⭐ [최적화된 로직] "인증광고" 열 데이터 생성
     trade_checked_by_owner = raw_data.get('tradeCheckedByOwner')
     
-    # 값이 Boolean True이거나, 문자열 'True'인 경우에만 "인증광고"로 표기
+    # 값이 Boolean True, 문자열 'True', 'Y', '1' 인 경우 모두 '인증광고'로 판단
     is_certified = (trade_checked_by_owner is True or 
-                    (isinstance(trade_checked_by_owner, str) and trade_checked_by_owner.upper() == 'TRUE'))
+                    str(trade_checked_by_owner).upper() in ['TRUE', 'Y', '1'])
                     
     certification_ad = "인증광고" if is_certified else ""
 
