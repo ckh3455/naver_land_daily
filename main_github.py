@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-GitHub Actions용 네이버 부동산 크롤러 (API 필드 기반 '집주인' 식별 및 경도/위도 추가)
-- '집주인' 라벨을 API 응답 필드 "verificationTypeCode": "OWNER"로 식별
-- 매물번호 앞에 '경도', '위도' 열 추가
+GitHub Actions용 네이버 부동산 크롤러 (최종 통합 버전)
+- '집주인' (verificationTypeCode: OWNER) 식별
+- '경도', '위도' 기록
+- '인증광고' (tradeCheckedByOwner: True) 기록 ⭐ 추가됨
 - 각 단지 완료 시 Google Sheet에 즉시 기록
 """
 
@@ -65,7 +66,6 @@ def setup_google_sheets():
     
     try:
         credentials_file = 'service_account.json'
-        debug_log(f"서비스 계정 파일 확인: {credentials_file}", "DEBUG")
         
         if not os.path.exists(credentials_file):
             debug_log(f"서비스 계정 파일이 없습니다: {credentials_file}", "ERROR")
@@ -75,24 +75,15 @@ def setup_google_sheets():
             credentials_file,
             scopes=['https://www.googleapis.com/auth/spreadsheets']
         )
-        debug_log("서비스 계정 인증 완료", "SUCCESS")
-        
         gc = gspread.authorize(credentials)
-        
         spreadsheet_id = os.environ.get('SPREADSHEET_ID', '1QP56lm5kPBdsUhrgcgY2U-JdmukXIkKCSxefd1QExKE')
-        debug_log(f"스프레드시트 ID: {spreadsheet_id}", "DEBUG")
-        
         spreadsheet = gc.open_by_key(spreadsheet_id)
-        debug_log(f"스프레드시트 열기 성공: {spreadsheet.title}", "SUCCESS")
         
         try:
             worksheet = spreadsheet.worksheet("네이버 매물분석")
-            debug_log("기존 워크시트 발견", "SUCCESS")
             return worksheet
         except gspread.WorksheetNotFound:
-            debug_log("워크시트 없음. 새로 생성 중...", "WARNING")
             worksheet = spreadsheet.add_worksheet(title="네이버 매물분석", rows=1000, cols=20)
-            debug_log("워크시트 생성 완료", "SUCCESS")
             return worksheet
             
     except Exception as e:
@@ -145,7 +136,6 @@ class AggressiveCardScroll:
             )
             self.page = await self.context.new_page()
             self.page.on('response', self.handle_response)
-            debug_log("새 페이지 생성 완료 및 응답 리스너 등록", "SUCCESS")
             
         except Exception as e:
             debug_log(f"Playwright 설정 실패: {str(e)}", "ERROR")
@@ -181,7 +171,7 @@ class AggressiveCardScroll:
                     if article_no and article_no not in self.unique_article_nos:
                         self.unique_article_nos.add(article_no)
                         
-                        # ⭐ 'verificationTypeCode' 필드를 이용해 '집주인' 여부 확인
+                        # 'verificationTypeCode' 필드를 이용해 '집주인' 여부 확인
                         is_owner = article.get('verificationTypeCode') == 'OWNER'
                         
                         property_data = {
@@ -204,8 +194,6 @@ class AggressiveCardScroll:
         
         return False
     
-    # 'check_owner_label' 함수 제거됨 (API 기반으로 대체)
-    
     async def navigate_to_complex_page(self):
         """단지 페이지로 이동"""
         debug_log("=== 단지 페이지 이동 시작 ===", "STEP")
@@ -214,7 +202,6 @@ class AggressiveCardScroll:
             await self.page.goto(self.base_url, wait_until='networkidle', timeout=60000)
             await asyncio.sleep(2)
             
-            # 매물 리스트 로딩을 위해 탭 클릭 시도
             try:
                 await self.page.click('text="매물/시세"', timeout=5000)
                 await asyncio.sleep(3)
@@ -242,7 +229,7 @@ class AggressiveCardScroll:
             current_count = len(self.property_cards)
             
             try:
-                # 스크롤 로직 (API 요청 유발 목적)
+                # 스크롤 로직 
                 scroll_methods = [
                     "window.scrollTo(0, document.body.scrollHeight);",
                     "window.scrollBy(0, 1000);",
@@ -286,15 +273,10 @@ class AggressiveCardScroll:
 
     async def run(self):
         """크롤러 실행"""
-        debug_log(f"\n{'='*70}", "STEP")
-        debug_log(f"🏢 {self.complex_name} 크롤링 시작", "STEP")
-        debug_log(f"{'='*70}", "STEP")
-        
         try:
             await self.setup_playwright()
             await self.navigate_to_complex_page()
             await self.aggressive_scroll()
-
             await self.close_browser()
             
             return {
@@ -317,7 +299,7 @@ class AggressiveCardScroll:
 
 
 def format_property_data(property_data):
-    """매물 데이터 포맷팅 ('is_owner_flag' 기반으로 '집주인' 열 포함 및 경도/위도 추가)"""
+    """매물 데이터 포맷팅 ('인증광고' 열 추가 반영)"""
     raw_data = property_data.get('raw_data', {})
     
     # 면적 정보 (생략)
@@ -378,14 +360,18 @@ def format_property_data(property_data):
         elif monthly:
             price = f"{monthly}만원"
     
-    # ⭐ '집주인' 열 데이터 생성
+    # '집주인' 열 데이터 생성
     is_owner_flag = property_data.get('is_owner_flag', False)
     is_owner_listing = "집주인" if is_owner_flag is True else ""
 
-    # ⭐ 경도/위도 데이터 추출
+    # 경도/위도 데이터 추출
     longitude = raw_data.get('longitude', '')
     latitude = raw_data.get('latitude', '')
     
+    # ⭐ [추가된 로직] "인증광고" 열 데이터 생성
+    trade_checked_by_owner = raw_data.get('tradeCheckedByOwner', False)
+    certification_ad = "인증광고" if trade_checked_by_owner is True else ""
+
     return [
         property_data.get('complex_name', ''),  # 1. 단지명
         trade_type,  # 2. 거래구분
@@ -402,7 +388,8 @@ def format_property_data(property_data):
         is_owner_listing, # 13. 집주인
         longitude, # 14. 경도
         latitude,  # 15. 위도
-        raw_data.get('articleNo', '')  # 16. 매물번호
+        raw_data.get('articleNo', ''),  # 16. 매물번호
+        certification_ad # 17. 인증광고
     ]
 
 
@@ -424,10 +411,10 @@ async def main():
     worksheet.clear()
     debug_log("기존 데이터 삭제 완료", "SUCCESS")
     
-    # ⭐ 헤더 수정: 경도, 위도 열 추가 (총 16개 열)
+    # ⭐ 헤더 수정: '인증광고' 열 추가 (총 17개 열)
     headers = ["단지명", "거래구분", "동", "층수", "면적", "가격", "가격변동", 
                "중복업소", "중개업소", "등록일자", "특기사항", "제공", "집주인", 
-               "경도", "위도", "매물번호"] 
+               "경도", "위도", "매물번호", "인증광고"] 
     debug_log(f"헤더 추가 중: {headers}", "DEBUG")
     worksheet.append_row(headers)
     debug_log("헤더 추가 완료", "SUCCESS")
@@ -471,16 +458,15 @@ async def main():
                         raw_data = prop.get('raw_data', {})
                         debug_log(f"--- 매물 샘플 #{i+1} (Article No: {prop.get('article_no', 'N/A')}) ---", "INFO")
                         # API 필드 기반 확인 결과 출력
-                        debug_log(f"API 확인: Is Owner Flag = {prop.get('is_owner_flag', 'False')}", "INFO")
                         debug_log(f"Raw Data 필드: verificationTypeCode = {raw_data.get('verificationTypeCode', 'N/A')}", "INFO")
-                        debug_log(f"Raw Data 필드: Longitude(경도) = {raw_data.get('longitude', 'N/A')}", "INFO")
+                        debug_log(f"Raw Data 필드: tradeCheckedByOwner = {raw_data.get('tradeCheckedByOwner', 'N/A')}", "INFO") # ⭐ 인증광고 필드 출력
                         
                         debug_log("API Raw Data (원본 JSON):", "INFO")
                         print(json.dumps(raw_data, indent=2, ensure_ascii=False))
                     
                     # 데이터 포맷팅
                     formatted_row = format_property_data(prop)
-                    if len(formatted_row) == 16: # 총 16개 열
+                    if len(formatted_row) == 17: # 총 17개 열
                         rows_to_append.append(formatted_row)
             
             # 🚀 해당 단지의 매물을 시트에 즉시 기록
