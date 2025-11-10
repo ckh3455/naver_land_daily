@@ -13,6 +13,7 @@ import time
 import gspread
 from google.oauth2 import service_account
 import traceback
+from gspread.utils import a1_to_rowcol # gspread 셀 서식 적용에 필요
 
 # 23개 단지 목록
 COMPLEXES = [
@@ -110,7 +111,88 @@ def setup_google_sheets():
         return None
 
 
+# ==============================================================================
+# 💡 핵심 수정 사항 1: 초록색 텍스트 서식 적용 함수 추가
+# ==============================================================================
+def apply_green_format(worksheet, start_row, end_row, col_name, row_indices_to_format):
+    """
+    gspread Batch Update를 사용하여 특정 행의 중개업소 셀에 초록색 텍스트 서식 적용
+    """
+    debug_log(f"총 {len(row_indices_to_format)}개 행에 초록색 텍스트 서식 적용 시도...", "INFO")
+    
+    # 중개업소 열 (H열)의 인덱스 확인 (0부터 시작)
+    headers = ["단지명", "거래구분", "동", "층수", "면적", "가격", "가격변동", "중복업소", "중개업소", "등록일자", "특기사항", "제공", "매물번호"]
+    # '중개업소' 열은 9번째 (인덱스 8, Col I)
+    # *원래 헤더 목록*: ["단지명", "거래구분", "동", "층수", "면적", "가격", "가격변동", "중복업소", "중개업소", "등록일자", "특기사항", "제공", "매물번호"]
+    # *헤더 인덱스*:      0        1       2     3      4       5       6        7        8         9         10      11       12
+    # *A1 표기*:         A        B       C     D      E       F       G        H        I         J         K       L        M
+    # Col I가 중개업소 열입니다.
+    
+    # 헤더가 1행에 있으므로, 데이터는 2행부터 시작하며, row_indices_to_format은 0부터 시작하는 데이터 인덱스입니다.
+    # 실제 시트 행 번호 = 데이터 인덱스 + 2 (헤더(1) + 0부터 시작하는 인덱스 보정(1))
+    
+    broker_col_index = headers.index("중개업소") 
+    broker_col_a1 = chr(ord('A') + broker_col_index) # 'I'
+    
+    requests = []
+    
+    # 초록색 텍스트 서식 정의
+    green_text_format = {
+        "textFormat": {
+            "foregroundColor": {
+                "red": 0.0,
+                "green": 0.5, # 짙은 초록 (약간 밝은 초록색은 0.6)
+                "blue": 0.0
+            },
+            "bold": True # 눈에 띄게 굵게
+        }
+    }
+    
+    # 서식을 적용할 범위 생성
+    for data_index in row_indices_to_format:
+        sheet_row = data_index + 2 # 데이터는 2행부터 시작
+        range_a1 = f"{broker_col_a1}{sheet_row}" 
+        
+        # GridRange 객체를 사용하여 요청 생성
+        # startRowIndex: 0부터 시작하는 시트 행 인덱스 (sheet_row - 1)
+        # endRowIndex: startRowIndex + 1
+        # startColumnIndex: 0부터 시작하는 열 인덱스 (broker_col_index)
+        # endColumnIndex: startColumnIndex + 1
+        requests.append({
+            "updateCells": {
+                "range": {
+                    "sheetId": worksheet.id,
+                    "startRowIndex": sheet_row - 1,
+                    "endRowIndex": sheet_row,
+                    "startColumnIndex": broker_col_index,
+                    "endColumnIndex": broker_col_index + 1
+                },
+                "rows": [
+                    {
+                        "values": [
+                            {
+                                "userEnteredFormat": green_text_format
+                            }
+                        ]
+                    }
+                ],
+                "fields": "userEnteredFormat.textFormat.foregroundColor,userEnteredFormat.textFormat.bold"
+            }
+        })
+
+    if requests:
+        try:
+            debug_log(f"Batch update 요청 {len(requests)}개 실행 중...", "DEBUG")
+            worksheet.batch_update(requests)
+            debug_log("셀 서식 적용 완료", "SUCCESS")
+        except Exception as e:
+            debug_log(f"셀 서식 적용 실패: {str(e)}", "ERROR")
+            debug_log(f"상세 에러:\n{traceback.format_exc()}", "DEBUG")
+# ==============================================================================
+
+
 class AggressiveCardScroll:
+    # (클래스 내용은 변경 없음)
     """검증된 네이버 부동산 매물 크롤러 (원본 로직 유지)"""
     
     def __init__(self, complex_id, complex_name):
@@ -305,9 +387,9 @@ class AggressiveCardScroll:
                     "window.scrollTo({top: document.body.scrollHeight, behavior: 'smooth'});",
                     """
                     const articleList = document.querySelector('[class*="article"]') || 
-                                      document.querySelector('.item_list') ||
-                                      document.querySelector('[data-testid*="article"]') ||
-                                      document.querySelector('.list_area');
+                                        document.querySelector('.item_list') ||
+                                        document.querySelector('[data-testid*="article"]') ||
+                                        document.querySelector('.list_area');
                     if (articleList) {
                         articleList.scrollTop = articleList.scrollHeight;
                     }
@@ -412,8 +494,14 @@ class AggressiveCardScroll:
             raise
 
 
+# ==============================================================================
+# 💡 핵심 수정 사항 2: 서식 정보 반환하도록 format_property_data 수정
+# ==============================================================================
 def format_property_data(property_data):
-    """매물 데이터 포맷팅 (검증된 로직)"""
+    """
+    매물 데이터 포맷팅. 매물 데이터 리스트와 서식 적용 여부(boolean)를 튜플로 반환합니다.
+    (데이터 리스트, is_owner_direct_trade)
+    """
     raw_data = property_data.get('raw_data', {})
     
     # 면적 정보
@@ -430,7 +518,7 @@ def format_property_data(property_data):
     else:
         area = f"{area_name}m²"
     
-    # 특기사항
+    # 특기사항 및 '집주인' 매물 여부 확인
     special_notes = []
     direction = raw_data.get('direction', '')
     if direction:
@@ -447,19 +535,34 @@ def format_property_data(property_data):
         tags = " | ".join(tag_list)
         special_notes.append(f"태그: {tags}")
     
+    # '집주인' 매물 여부 확인
+    is_owner_direct_trade = '집주인' in (raw_data.get('realtorName', '') or '')
+    
+    # '집주인' 매물인 경우 태그에 추가 (선택 사항이지만 명확하게 하기 위해)
+    if is_owner_direct_trade and '집주인 직접' not in special_notes_str:
+         special_notes.append('집주인 직접')
+        
     special_notes_str = " | ".join(special_notes) if special_notes else ""
     
     # 중개업소명 정리
     broker_name = raw_data.get('realtorName', '')
     if broker_name and broker_name != "Unknown":
         remove_strings = ['공인중개사사무소', '(주)', '중개법인', '주식회사', '부동산중개', 
-                         '부동산중개법인주식회사', '부동산중개법인', '공인중개사', '부동산']
+                          '부동산중개법인주식회사', '부동산중개법인', '공인중개사', '부동산']
         for remove_str in remove_strings:
+            # '집주인'은 남기도록 처리
+            if remove_str == '공인중개사사무소' and '집주인' in broker_name:
+                continue 
             broker_name = broker_name.replace(remove_str, '')
-        broker_name = re.sub(r'\d+', '', broker_name).strip()
+        
+        # '집주인' 매물의 경우 '집주인'만 남기고 다른 숫자/문자 제거
+        if is_owner_direct_trade:
+            broker_name = '🏠집주인 직접'
+        else:
+            broker_name = re.sub(r'\d+', '', broker_name).strip()
     else:
         broker_name = "Unknown"
-    
+        
     # 날짜 형식 변환
     date_str = raw_data.get('articleConfirmYmd', '')
     if date_str and len(date_str) == 8 and date_str.isdigit():
@@ -482,20 +585,21 @@ def format_property_data(property_data):
             price = f"{monthly}만원"
     
     return [
-        property_data.get('complex_name', ''),  # 단지명
-        trade_type,  # 거래구분
-        raw_data.get('buildingName', ''),  # 동
-        raw_data.get('floorInfo', ''),  # 층수
-        area,  # 면적
-        price,  # 가격
-        '',  # 가격변동
-        1,  # 중복업소
-        broker_name,  # 중개업소
-        registration_date,  # 등록일자
-        special_notes_str,  # 특기사항
-        raw_data.get('cpName', '') or 'Unknown',  # 제공
-        raw_data.get('articleNo', '')  # 매물번호
-    ]
+        property_data.get('complex_name', ''),  # 0. 단지명
+        trade_type,  # 1. 거래구분
+        raw_data.get('buildingName', ''),  # 2. 동
+        raw_data.get('floorInfo', ''),  # 3. 층수
+        area,  # 4. 면적
+        price,  # 5. 가격
+        '',  # 6. 가격변동
+        1,  # 7. 중복업소
+        broker_name,  # 8. 중개업소
+        registration_date,  # 9. 등록일자
+        special_notes_str,  # 10. 특기사항
+        raw_data.get('cpName', '') or 'Unknown',  # 11. 제공
+        raw_data.get('articleNo', '')  # 12. 매물번호
+    ], is_owner_direct_trade
+# ==============================================================================
 
 
 async def main():
@@ -527,7 +631,8 @@ async def main():
     # 크롤링 시작
     debug_log("=== 3단계: 크롤링 실행 ===", "STEP")
     results = []
-    all_properties = []
+    all_rows = [] # 시트에 기록할 모든 데이터 행
+    owner_direct_trade_indices = [] # '집주인' 매물의 데이터 인덱스 (0부터 시작)
     total_start_time = time.time()
     
     # 23개 단지 순회
@@ -548,13 +653,18 @@ async def main():
             property_count = result['property_count']
             debug_log(f"✅ {complex_info['name']} 완료: {property_count}개 매물 ({complex_duration:.1f}초)", "SUCCESS")
             
-            # 데이터 포맷팅
+            # 데이터 포맷팅 및 서식 정보 기록
             if result.get('properties'):
-                debug_log(f"데이터 포맷팅 중... ({len(result['properties'])}개)", "DEBUG")
+                debug_log(f"데이터 포맷팅 및 서식 정보 기록 중... ({len(result['properties'])}개)", "DEBUG")
                 for property_data in result['properties']:
-                    formatted_row = format_property_data(property_data)
-                    all_properties.append(formatted_row)
-                debug_log("데이터 포맷팅 완료", "SUCCESS")
+                    formatted_row, is_owner_direct_trade = format_property_data(property_data)
+                    
+                    if is_owner_direct_trade:
+                        # '집주인' 매물인 경우, 현재 데이터 인덱스(all_rows에 추가되기 전 길이)를 기록
+                        owner_direct_trade_indices.append(len(all_rows)) 
+                    
+                    all_rows.append(formatted_row)
+                debug_log(f"데이터 포맷팅 완료. '집주인' 매물 {len(owner_direct_trade_indices)}개 발견", "SUCCESS")
             
             results.append({
                 'complex_name': complex_info['name'],
@@ -584,13 +694,20 @@ async def main():
             await asyncio.sleep(5)
     
     # 구글 시트에 데이터 기록
-    debug_log("=== 4단계: 구글 시트 기록 ===", "STEP")
-    if all_properties:
-        debug_log(f"총 {len(all_properties)}개 매물 기록 중...", "INFO")
-        worksheet.append_rows(all_properties)
-        debug_log("구글 시트 기록 완료", "SUCCESS")
+    debug_log("=== 4단계: 구글 시트 데이터 기록 ===", "STEP")
+    if all_rows:
+        debug_log(f"총 {len(all_rows)}개 매물 기록 중...", "INFO")
+        worksheet.append_rows(all_rows, value_input_option='USER_ENTERED')
+        debug_log("구글 시트 데이터 기록 완료", "SUCCESS")
     else:
         debug_log("기록할 매물 데이터가 없습니다", "WARNING")
+        
+    # 구글 시트에 서식 적용 (데이터 기록 후)
+    debug_log("=== 5단계: 구글 시트 서식 적용 (집주인) ===", "STEP")
+    if owner_direct_trade_indices:
+        apply_green_format(worksheet, 2, len(all_rows) + 1, "중개업소", owner_direct_trade_indices)
+    else:
+        debug_log("'집주인' 매물이 없어 서식을 적용할 필요가 없습니다.", "INFO")
     
     # 전체 결과 요약
     total_end_time = time.time()
@@ -619,7 +736,7 @@ async def main():
     print("-"*70)
     
     # 결과를 JSON 파일로 저장
-    debug_log("=== 5단계: 결과 파일 저장 ===", "STEP")
+    debug_log("=== 6단계: 결과 파일 저장 ===", "STEP")
     result_data = {
         'total_duration_seconds': total_duration,
         'total_duration_minutes': total_duration/60,
