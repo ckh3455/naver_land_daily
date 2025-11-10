@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-GitHub Actions용 네이버 부동산 크롤러 (디버깅 강화 및 기능 통합 버전)
-- '집주인' 라벨은 화면 요소 크롤링으로 확인 (셀렉터 강화)
+GitHub Actions용 네이버 부동산 크롤러 (API 필드 기반 '집주인' 식별 버전)
+- '집주인' 라벨을 API 응답 필드 "verificationTypeCode": "OWNER"로 식별
+- 화면 크롤링 로직 제거로 안정성 및 속도 개선
 - 각 단지 완료 시 Google Sheet에 즉시 기록
 - 각 단지 완료 시 매물 5개 샘플 Raw Data 출력 (디버깅용)
 """
@@ -102,7 +103,7 @@ def setup_google_sheets():
 
 
 class AggressiveCardScroll:
-    """네이버 부동산 매물 크롤러 (API 응답 가로채기 + 화면 요소 확인)"""
+    """네이버 부동산 매물 크롤러 (API 응답 기반 최적화)"""
     
     def __init__(self, complex_id, complex_name):
         self.complex_id = complex_id
@@ -168,7 +169,7 @@ class AggressiveCardScroll:
                 debug_log(f"API 응답 파싱 실패: {url} - {str(e)}", "WARNING")
 
     async def extract_properties_from_response(self, data, url):
-        """API 응답에서 매물 데이터 추출"""
+        """API 응답에서 매물 데이터 추출 및 '집주인' 플래그 설정"""
         if isinstance(data, dict) and 'articleList' in data:
             articles = data['articleList']
             page_match = re.search(r'page=(\d+)', url)
@@ -181,6 +182,9 @@ class AggressiveCardScroll:
                     if article_no and article_no not in self.unique_article_nos:
                         self.unique_article_nos.add(article_no)
                         
+                        # ⭐ 'verificationTypeCode' 필드를 이용해 '집주인' 여부 확인
+                        is_owner = article.get('verificationTypeCode') == 'OWNER'
+                        
                         property_data = {
                             'complex_id': self.complex_id,
                             'complex_name': self.complex_name,
@@ -189,7 +193,7 @@ class AggressiveCardScroll:
                             'extracted_at': datetime.now().isoformat(),
                             'card_number': len(self.property_cards) + 1,
                             'page_number': page_num,
-                            'is_owner_flag': False 
+                            'is_owner_flag': is_owner # API 필드 기반으로 플래그 설정
                         }
                         self.property_cards.append(property_data)
                         new_properties += 1
@@ -201,46 +205,8 @@ class AggressiveCardScroll:
         
         return False
     
-    async def check_owner_label(self):
-        """화면에 로드된 매물 카드를 순회하며 '집주인' 라벨 여부를 확인 (디버깅 핵심)"""
-        debug_log("화면 상의 매물 카드에서 '집주인' 라벨 확인 시작...", "DEBUG")
-        
-        # 가장 안정적인 매물 카드 컨테이너 셀렉터
-        CARD_SELECTOR = '[data-testid="article-list-item"]'
-        
-        # ⭐ '집주인' 라벨을 찾는 셀렉터 강화: 
-        # 매물 카드 내부에서 '집주인' 텍스트를 포함하는 span이나 div를 찾습니다.
-        # 네이버 부동산 태그는 보통 <span> 태그입니다.
-        OWNER_LABEL_SELECTOR = 'span:has-text("집주인")'
-        
-        cards = await self.page.locator(CARD_SELECTOR).all()
-        owner_found_count = 0
-        
-        for card_locator in cards:
-            article_no = ""
-            try:
-                article_no_element = await card_locator.get_by_role('link').get_attribute('href')
-                if article_no_element:
-                    article_no = article_no_element.split('/')[-1].split('?')[0]
-            except:
-                pass
-
-            # '집주인' 라벨이 카드 내부에 존재하는지 확인
-            is_owner = await card_locator.locator(OWNER_LABEL_SELECTOR).count() > 0
-
-            # 수집된 데이터(self.property_cards)에 'is_owner_flag' 업데이트
-            if is_owner and article_no:
-                owner_found_count += 1
-                for prop in self.property_cards:
-                    if prop.get('article_no') == article_no:
-                        if prop.get('is_owner_flag') is not True:
-                             prop['is_owner_flag'] = True
-                             debug_log(f"  ✅ 매물 {article_no}: '집주인' 플래그 확인 (화면 크롤링 성공)", "DEBUG")
-                        break
-            
-        debug_log(f"총 {owner_found_count}개의 '집주인' 라벨 매물 식별 완료", "INFO")
-        return owner_found_count
-
+    # ❌ 'check_owner_label' 함수 제거됨 (API 기반으로 대체)
+    
     async def navigate_to_complex_page(self):
         """단지 페이지로 이동"""
         debug_log("=== 단지 페이지 이동 시작 ===", "STEP")
@@ -266,7 +232,7 @@ class AggressiveCardScroll:
             raise
 
     async def aggressive_scroll(self):
-        """적극적인 스크롤 및 '집주인' 라벨 확인"""
+        """적극적인 스크롤 (API 요청 유발)"""
         debug_log("=== 적극적인 스크롤 시작 ===", "STEP")
         
         consecutive_no_change = 0
@@ -277,7 +243,7 @@ class AggressiveCardScroll:
             current_count = len(self.property_cards)
             
             try:
-                # 스크롤 로직 (생략)
+                # 스크롤 로직 (API 요청 유발 목적)
                 scroll_methods = [
                     "window.scrollTo(0, document.body.scrollHeight);",
                     "window.scrollBy(0, 1000);",
@@ -302,9 +268,6 @@ class AggressiveCardScroll:
             else:
                 consecutive_no_change += 1
                 debug_log(f"새로운 매물 없음 (연속 {consecutive_no_change}회)", "WARNING")
-            
-            # ⭐ 화면에 로드된 매물 카드에서 '집주인' 플래그 확인
-            await self.check_owner_label()
             
             if consecutive_no_change >= 3:
                 debug_log(f"⏹️  연속 {consecutive_no_change}회 변화 없음. 스크롤 종료", "INFO")
@@ -335,7 +298,6 @@ class AggressiveCardScroll:
 
             await self.close_browser()
             
-            # run 결과에 property_cards를 포함시켜 main 함수에서 디버깅 및 시트 기록에 사용
             return {
                 'complex_id': self.complex_id,
                 'complex_name': self.complex_name,
@@ -346,7 +308,6 @@ class AggressiveCardScroll:
         except Exception as e:
             debug_log(f"크롤링 중 치명적 오류 발생: {str(e)}", "ERROR")
             await self.close_browser()
-            # 오류 발생 시에도 빈 results를 반환하여 main 함수가 멈추지 않도록 함
             return {
                 'complex_id': self.complex_id,
                 'complex_name': self.complex_name,
@@ -488,7 +449,7 @@ async def main():
                 'property_count': 0,
                 'duration_seconds': complex_duration,
                 'status': 'error',
-                'error': result['error']
+                'error': result.get('error')
              })
              
         else: # 정상적인 완료 또는 매물 없음
@@ -501,10 +462,14 @@ async def main():
                 
                 for i, prop in enumerate(result['properties']):
                     if i < 5:
+                        raw_data = prop.get('raw_data', {})
                         debug_log(f"--- 매물 샘플 #{i+1} (Article No: {prop.get('article_no', 'N/A')}) ---", "INFO")
-                        debug_log(f"Playwright 확인: Is Owner Flag = {prop.get('is_owner_flag', 'False')}", "INFO")
+                        # API 필드 기반 확인 결과 출력
+                        debug_log(f"API 확인: Is Owner Flag = {prop.get('is_owner_flag', 'False')}", "INFO")
+                        debug_log(f"Raw Data 필드: verificationTypeCode = {raw_data.get('verificationTypeCode', 'N/A')}", "INFO")
+                        
                         debug_log("API Raw Data (원본 JSON):", "INFO")
-                        print(json.dumps(prop.get('raw_data', {}), indent=2, ensure_ascii=False))
+                        print(json.dumps(raw_data, indent=2, ensure_ascii=False))
                     
                     # 데이터 포맷팅
                     formatted_row = format_property_data(prop)
@@ -528,21 +493,24 @@ async def main():
             debug_log("다음 단지까지 5초 대기...", "DEBUG")
             await asyncio.sleep(5)
     
-    # === 3단계: 전체 결과 요약 및 저장 (생략) ===
+    # === 3단계: 전체 결과 요약 및 저장 ===
     total_end_time = time.time()
     total_duration = total_end_time - total_start_time
-    # ... (생략) ...
+    total_properties = sum(r['property_count'] for r in results)
     
     print("\n" + "="*70)
     print("📊 전체 결과 요약")
     print("="*70)
-    print("... (중략) ...")
+    print(f"⏰ 종료시간: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"⏱️  전체 소요시간: {total_duration:.1f}초 ({total_duration/60:.1f}분)")
+    print(f"🏠 총 매물 수: {total_properties}개")
+    print("="*70)
     
-    # JSON 파일 저장 (생략)
+    # JSON 파일 저장
     result_data = {
         'total_duration_seconds': total_duration,
         'start_time': datetime.fromtimestamp(total_start_time).strftime('%Y-%m-%d %H:%M:%S'),
-        'total_properties': sum(r['property_count'] for r in results),
+        'total_properties': total_properties,
         'results': [{k:v for k,v in r.items() if k != 'properties'} for r in results]
     }
     with open('crawling_results.json', 'w', encoding='utf-8') as f:
