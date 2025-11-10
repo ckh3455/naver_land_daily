@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-GitHub Actions용 네이버 부동산 크롤러 (API 필드 기반 '집주인' 식별 버전)
+GitHub Actions용 네이버 부동산 크롤러 (API 필드 기반 '집주인' 식별 및 경도/위도 추가)
 - '집주인' 라벨을 API 응답 필드 "verificationTypeCode": "OWNER"로 식별
-- 화면 크롤링 로직 제거로 안정성 및 속도 개선
+- 매물번호 앞에 '경도', '위도' 열 추가
 - 각 단지 완료 시 Google Sheet에 즉시 기록
-- 각 단지 완료 시 매물 5개 샘플 Raw Data 출력 (디버깅용)
 """
 
 import asyncio
@@ -205,7 +204,7 @@ class AggressiveCardScroll:
         
         return False
     
-    # ❌ 'check_owner_label' 함수 제거됨 (API 기반으로 대체)
+    # 'check_owner_label' 함수 제거됨 (API 기반으로 대체)
     
     async def navigate_to_complex_page(self):
         """단지 페이지로 이동"""
@@ -318,7 +317,7 @@ class AggressiveCardScroll:
 
 
 def format_property_data(property_data):
-    """매물 데이터 포맷팅 ('is_owner_flag' 기반으로 '집주인' 열 포함)"""
+    """매물 데이터 포맷팅 ('is_owner_flag' 기반으로 '집주인' 열 포함 및 경도/위도 추가)"""
     raw_data = property_data.get('raw_data', {})
     
     # 면적 정보 (생략)
@@ -382,6 +381,10 @@ def format_property_data(property_data):
     # ⭐ '집주인' 열 데이터 생성
     is_owner_flag = property_data.get('is_owner_flag', False)
     is_owner_listing = "집주인" if is_owner_flag is True else ""
+
+    # ⭐ 경도/위도 데이터 추출
+    longitude = raw_data.get('longitude', '')
+    latitude = raw_data.get('latitude', '')
     
     return [
         property_data.get('complex_name', ''),  # 1. 단지명
@@ -397,7 +400,9 @@ def format_property_data(property_data):
         special_notes_str,  # 11. 특기사항
         raw_data.get('cpName', '') or 'Unknown',  # 12. 제공
         is_owner_listing, # 13. 집주인
-        raw_data.get('articleNo', '')  # 14. 매물번호
+        longitude, # 14. 경도
+        latitude,  # 15. 위도
+        raw_data.get('articleNo', '')  # 16. 매물번호
     ]
 
 
@@ -419,8 +424,10 @@ async def main():
     worksheet.clear()
     debug_log("기존 데이터 삭제 완료", "SUCCESS")
     
+    # ⭐ 헤더 수정: 경도, 위도 열 추가 (총 16개 열)
     headers = ["단지명", "거래구분", "동", "층수", "면적", "가격", "가격변동", 
-               "중복업소", "중개업소", "등록일자", "특기사항", "제공", "집주인", "매물번호"] 
+               "중복업소", "중개업소", "등록일자", "특기사항", "제공", "집주인", 
+               "경도", "위도", "매물번호"] 
     debug_log(f"헤더 추가 중: {headers}", "DEBUG")
     worksheet.append_row(headers)
     debug_log("헤더 추가 완료", "SUCCESS")
@@ -443,7 +450,6 @@ async def main():
         complex_duration = time.time() - complex_start_time
         
         if 'error' in result:
-             # 크롤링 중 치명적인 오류 발생
              results.append({
                 'complex_name': complex_info['name'],
                 'property_count': 0,
@@ -452,7 +458,7 @@ async def main():
                 'error': result.get('error')
              })
              
-        else: # 정상적인 완료 또는 매물 없음
+        else:
             property_count = result['property_count']
             rows_to_append = []
             
@@ -467,13 +473,14 @@ async def main():
                         # API 필드 기반 확인 결과 출력
                         debug_log(f"API 확인: Is Owner Flag = {prop.get('is_owner_flag', 'False')}", "INFO")
                         debug_log(f"Raw Data 필드: verificationTypeCode = {raw_data.get('verificationTypeCode', 'N/A')}", "INFO")
+                        debug_log(f"Raw Data 필드: Longitude(경도) = {raw_data.get('longitude', 'N/A')}", "INFO")
                         
                         debug_log("API Raw Data (원본 JSON):", "INFO")
                         print(json.dumps(raw_data, indent=2, ensure_ascii=False))
                     
                     # 데이터 포맷팅
                     formatted_row = format_property_data(prop)
-                    if len(formatted_row) == 14:
+                    if len(formatted_row) == 16: # 총 16개 열
                         rows_to_append.append(formatted_row)
             
             # 🚀 해당 단지의 매물을 시트에 즉시 기록
