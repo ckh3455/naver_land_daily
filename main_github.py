@@ -4,8 +4,10 @@ GitHub Actions용 네이버 부동산 크롤러 (최종 통합 버전)
 - '집주인' (verificationTypeCode: OWNER) 식별
 - '경도', '위도' 기록
 - '인증광고' (tradeCheckedByOwner: True, 'True', 'Y', '1' 등) 표기 로직 확장
+- '직거래' (isDirectTrade: True) 열 추가
+- '중개업소ID' (realtorId) 열 추가
 - 각 단지 완료 시 Google Sheet에 즉시 기록
-- 총 17개 열
+- 총 19개 열 (기존 17개에서 2개 추가)
 """
 
 import asyncio
@@ -300,10 +302,10 @@ class AggressiveCardScroll:
 
 
 def format_property_data(property_data):
-    """매물 데이터 포맷팅 ('인증광고' 열 표기 로직 최적화)"""
+    """매물 데이터 포맷팅 ('중개업소ID'와 '직거래' 열 추가)"""
     raw_data = property_data.get('raw_data', {})
     
-    # 면적 정보 (생략)
+    # 면적 정보 (기존 로직 유지)
     area_name = raw_data.get('areaName', '')
     area1 = raw_data.get('area1', '')
     area2 = raw_data.get('area2', '')
@@ -314,7 +316,7 @@ def format_property_data(property_data):
     else:
         area = f"{area_name}m²" or "Unknown"
     
-    # 특기사항 (생략)
+    # 특기사항 (기존 로직 유지)
     special_notes = []
     direction = raw_data.get('direction', '')
     if direction:
@@ -330,25 +332,18 @@ def format_property_data(property_data):
         special_notes.append(f"태그: {tags}")
     special_notes_str = " | ".join(special_notes) if special_notes else ""
     
-    # 중개업소명 정리 (생략)
-    broker_name = raw_data.get('realtorName', '')
-    if broker_name and broker_name != "Unknown":
-        remove_strings = ['공인중개사사무소', '(주)', '중개법인', '주식회사', '부동산중개', 
-                          '부동산중개법인주식회사', '부동산중개법인', '공인중개사', '부동산']
-        for remove_str in remove_strings:
-            broker_name = broker_name.replace(remove_str, '')
-        broker_name = re.sub(r'\d+', '', broker_name).strip()
-    else:
-        broker_name = "Unknown"
+    # 중개업소명/ID 정리 (요청에 따라 원본 realtorName 사용, ID 추가)
+    broker_name = raw_data.get('realtorName', '') or "Unknown" # 중개업소
+    broker_id = raw_data.get('realtorId', '') # 중개업소ID
     
-    # 날짜 형식 변환 (생략)
+    # 날짜 형식 변환 (기존 로직 유지)
     date_str = raw_data.get('articleConfirmYmd', '')
     if date_str and len(date_str) == 8 and date_str.isdigit():
         registration_date = f"{date_str[:4]}.{date_str[4:6]}.{date_str[6:8]}"
     else:
         registration_date = date_str or "Unknown"
     
-    # 가격 정보 (생략)
+    # 가격 정보 (기존 로직 유지)
     trade_type = raw_data.get('tradeTypeName', '')
     price = raw_data.get('dealOrWarrantPrc', '')
     if trade_type == '월세':
@@ -361,15 +356,19 @@ def format_property_data(property_data):
         elif monthly:
             price = f"{monthly}만원"
     
-    # '집주인' 열 데이터 생성
+    # '집주인' 열 데이터 생성 (기존 로직 유지)
     is_owner_flag = property_data.get('is_owner_flag', False)
     is_owner_listing = "집주인" if is_owner_flag is True else ""
 
-    # 경도/위도 데이터 추출
+    # 경도/위도 데이터 추출 (기존 로직 유지)
     longitude = raw_data.get('longitude', '')
     latitude = raw_data.get('latitude', '')
     
-    # ⭐ [최적화된 로직] "인증광고" 열 데이터 생성
+    # [새로운 로직] '직거래' 열 데이터 생성
+    is_direct_trade = raw_data.get('isDirectTrade')
+    direct_trade_listing = "직거래" if is_direct_trade is True else "" # 값이 True일 경우에만 '직거래' 표기
+    
+    # [최적화된 로직] "인증광고" 열 데이터 생성 (기존 로직 유지)
     trade_checked_by_owner = raw_data.get('tradeCheckedByOwner')
     
     # 값이 Boolean True, 문자열 'True', 'Y', '1' 인 경우 모두 '인증광고'로 판단
@@ -387,15 +386,17 @@ def format_property_data(property_data):
         price,  # 6. 가격
         '',  # 7. 가격변동
         1,  # 8. 중복업소
-        broker_name,  # 9. 중개업소
-        registration_date,  # 10. 등록일자
-        special_notes_str,  # 11. 특기사항
-        raw_data.get('cpName', '') or 'Unknown',  # 12. 제공
-        is_owner_listing, # 13. 집주인
-        longitude, # 14. 경도
-        latitude,  # 15. 위도
-        raw_data.get('articleNo', ''),  # 16. 매물번호
-        certification_ad # 17. 인증광고
+        broker_name,  # 9. 중개업소 (realtorName, 원본 그대로)
+        broker_id, # 10. 중개업소ID (realtorId) <--- NEW
+        registration_date,  # 11. 등록일자
+        special_notes_str,  # 12. 특기사항
+        direct_trade_listing, # 13. 직거래 <--- NEW
+        raw_data.get('cpName', '') or 'Unknown',  # 14. 제공
+        is_owner_listing, # 15. 집주인
+        longitude, # 16. 경도
+        latitude,  # 17. 위도
+        raw_data.get('articleNo', ''),  # 18. 매물번호
+        certification_ad # 19. 인증광고
     ]
 
 
@@ -417,17 +418,17 @@ async def main():
     worksheet.clear()
     debug_log("기존 데이터 삭제 완료", "SUCCESS")
     
-    # ⭐ 헤더 수정: '인증광고' 열 추가 (총 17개 열)
-    headers = ["단지명", "거래구분", "동", "층수", "면적", "가격", "가격변동", 
-               "중복업소", "중개업소", "등록일자", "특기사항", "제공", "집주인", 
-               "경도", "위도", "매물번호", "인증광고"] 
+    # ⭐ 헤더 수정: '중개업소ID'와 '직거래' 열 추가 (총 19개 열)
+    headers = ["단지명", "거래구분", "동", "층수", "면적", "가격", "가격변동",  
+               "중복업소", "중개업소", "중개업소ID", "등록일자", "특기사항", "직거래", "제공", "집주인", 
+               "경도", "위도", "매물번호", "인증광고"]  
     debug_log(f"헤더 추가 중: {headers}", "DEBUG")
     worksheet.append_row(headers)
     debug_log("헤더 추가 완료", "SUCCESS")
     
     # === 2단계: 크롤링 및 단지별 즉시 기록 ===
     debug_log("=== 2단계: 크롤링 실행 및 단지별 기록 ===", "STEP")
-    results = [] 
+    results = []  
     total_start_time = time.time()
     
     for idx, complex_info in enumerate(COMPLEXES, 1):
@@ -466,13 +467,19 @@ async def main():
                         # API 필드 기반 확인 결과 출력
                         debug_log(f"Raw Data 필드: verificationTypeCode = {raw_data.get('verificationTypeCode', 'N/A')}", "INFO")
                         debug_log(f"Raw Data 필드: tradeCheckedByOwner = {raw_data.get('tradeCheckedByOwner', 'N/A')}", "INFO") # ⭐ 인증광고 필드 출력
+                        debug_log(f"Raw Data 필드: isDirectTrade = {raw_data.get('isDirectTrade', 'N/A')}", "INFO") # 직거래 필드 출력
+                        
+                        # 요청에 따라 tradeCheckedByOwner가 false인 경우 로그 기록
+                        if raw_data.get('tradeCheckedByOwner') is False:
+                             debug_log(f"⚠️  tradeCheckedByOwner 값이 False로 기록됨.", "WARNING")
                         
                         debug_log("API Raw Data (원본 JSON):", "INFO")
+                        # 불필요한 전체 JSON 출력 대신, 핵심 필드만 출력하도록 조정할 수도 있지만, 원본 그대로 유지
                         print(json.dumps(raw_data, indent=2, ensure_ascii=False))
-                    
+                        
                     # 데이터 포맷팅
                     formatted_row = format_property_data(prop)
-                    if len(formatted_row) == 17: # 총 17개 열
+                    if len(formatted_row) == 19: # 총 19개 열
                         rows_to_append.append(formatted_row)
             
             # 🚀 해당 단지의 매물을 시트에 즉시 기록
