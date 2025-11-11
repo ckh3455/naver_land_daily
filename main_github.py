@@ -4,10 +4,10 @@ GitHub Actions용 네이버 부동산 크롤러 (최종 통합 버전)
 - '집주인' (verificationTypeCode: OWNER) 식별
 - '경도', '위도' 기록
 - '인증광고' (tradeCheckedByOwner: True, 'True', 'Y', '1' 등) 표기 로직 확장
-- '직거래' (isDirectTrade: True) 열 추가
-- '중개업소ID' (realtorId) 열 추가
-- 각 단지 완료 시 Google Sheet에 즉시 기록
-- 총 19개 열 (기존 17개에서 2개 추가)
+- '중개업소ID' (realtorId) 및 '직거래' (isDirectTrade) 열 추가
+- '방향' (direction), '사진 유무' (siteImageCount), '특기사항' (articleFeatureDesc) 열 추가
+- '가격변동' (priceChangeState) 필드 값을 '상승'/'하락'으로 표시 (색상 시각화는 시트의 조건부 서식 권장)
+- 총 20개 열
 """
 
 import asyncio
@@ -68,12 +68,14 @@ def setup_google_sheets():
     debug_log("=== 구글 시트 설정 시작 ===", "STEP")
     
     try:
+        # 서비스 계정 파일 경로 설정
         credentials_file = 'service_account.json'
         
         if not os.path.exists(credentials_file):
             debug_log(f"서비스 계정 파일이 없습니다: {credentials_file}", "ERROR")
             return None
         
+        # 자격 증명 설정
         credentials = service_account.Credentials.from_service_account_file(
             credentials_file,
             scopes=['https://www.googleapis.com/auth/spreadsheets']
@@ -82,11 +84,12 @@ def setup_google_sheets():
         spreadsheet_id = os.environ.get('SPREADSHEET_ID', '1QP56lm5kPBdsUhrgcgY2U-JdmukXIkKCSxefd1QExKE')
         spreadsheet = gc.open_by_key(spreadsheet_id)
         
+        # 워크시트 가져오기 또는 새로 생성
         try:
             worksheet = spreadsheet.worksheet("네이버 매물분석")
             return worksheet
         except gspread.WorksheetNotFound:
-            worksheet = spreadsheet.add_worksheet(title="네이버 매물분석", rows=1000, cols=20)
+            worksheet = spreadsheet.add_worksheet(title="네이버 매물분석", rows=1000, cols=30)
             return worksheet
             
     except Exception as e:
@@ -205,11 +208,13 @@ class AggressiveCardScroll:
             await self.page.goto(self.base_url, wait_until='networkidle', timeout=60000)
             await asyncio.sleep(2)
             
+            # 매물/시세 탭으로 이동 시도
             try:
                 await self.page.click('text="매물/시세"', timeout=5000)
                 await asyncio.sleep(3)
             except Exception:
                  pass
+            # 실거래가 탭으로 이동 시도 (API 호출 유발 목적)
             try:
                 await self.page.click('text="실거래가"', timeout=5000)
                 await asyncio.sleep(3)
@@ -226,13 +231,14 @@ class AggressiveCardScroll:
         
         consecutive_no_change = 0
         
+        # 최대 30 라운드 스크롤 시도
         for i in range(30):
             debug_log(f"--- 스크롤 라운드 {i+1}/30 ---", "STEP")
             
             current_count = len(self.property_cards)
             
             try:
-                # 스크롤 로직 
+                # 다양한 스크롤 방법 시도
                 scroll_methods = [
                     "window.scrollTo(0, document.body.scrollHeight);",
                     "window.scrollBy(0, 1000);",
@@ -244,7 +250,7 @@ class AggressiveCardScroll:
                 for method in scroll_methods:
                     await self.page.evaluate(method)
                     await asyncio.sleep(0.2)
-                await self.page.keyboard.press('End')
+                await self.page.keyboard.press('End') # End 키로 API 추가 호출 유도
                 await asyncio.sleep(0.5)
                 
             except Exception as e:
@@ -302,11 +308,15 @@ class AggressiveCardScroll:
 
 
 def format_property_data(property_data):
-    """매물 데이터 포맷팅 ('중개업소ID'와 '직거래' 열 추가)"""
+    """
+    매물 데이터 포맷팅 및 새로운 필드 ('방향', '사진유무', '특기사항', '가격변동', '중개업소ID', '직거래') 적용
+    총 20개 열을 반환합니다.
+    """
     raw_data = property_data.get('raw_data', {})
     
-    # 면적 정보 (기존 로직 유지)
-    area_name = raw_data.get('areaName', '')
+    # -------------------
+    # 면적 정보 처리
+    # -------------------
     area1 = raw_data.get('area1', '')
     area2 = raw_data.get('area2', '')
     if area1 and area2 and area1 != area2:
@@ -314,36 +324,11 @@ def format_property_data(property_data):
     elif area1:
         area = f"{area1}m²"
     else:
-        area = f"{area_name}m²" or "Unknown"
+        area = raw_data.get('areaName', '') + "m²" or "Unknown"
     
-    # 특기사항 (기존 로직 유지)
-    special_notes = []
-    direction = raw_data.get('direction', '')
-    if direction:
-        special_notes.append(f"방향: {direction}")
-    feature_desc = raw_data.get('articleFeatureDesc', '')
-    if feature_desc:
-        if "제공" in feature_desc:
-            feature_desc = feature_desc.split("제공")[0].strip()
-        special_notes.append(feature_desc)
-    tag_list = raw_data.get('tagList', [])
-    if tag_list:
-        tags = " | ".join(tag_list)
-        special_notes.append(f"태그: {tags}")
-    special_notes_str = " | ".join(special_notes) if special_notes else ""
-    
-    # 중개업소명/ID 정리 (요청에 따라 원본 realtorName 사용, ID 추가)
-    broker_name = raw_data.get('realtorName', '') or "Unknown" # 중개업소
-    broker_id = raw_data.get('realtorId', '') # 중개업소ID
-    
-    # 날짜 형식 변환 (기존 로직 유지)
-    date_str = raw_data.get('articleConfirmYmd', '')
-    if date_str and len(date_str) == 8 and date_str.isdigit():
-        registration_date = f"{date_str[:4]}.{date_str[4:6]}.{date_str[6:8]}"
-    else:
-        registration_date = date_str or "Unknown"
-    
-    # 가격 정보 (기존 로직 유지)
+    # -------------------
+    # 가격 정보 처리
+    # -------------------
     trade_type = raw_data.get('tradeTypeName', '')
     price = raw_data.get('dealOrWarrantPrc', '')
     if trade_type == '월세':
@@ -356,47 +341,67 @@ def format_property_data(property_data):
         elif monthly:
             price = f"{monthly}만원"
     
-    # '집주인' 열 데이터 생성 (기존 로직 유지)
-    is_owner_flag = property_data.get('is_owner_flag', False)
-    is_owner_listing = "집주인" if is_owner_flag is True else ""
-
-    # 경도/위도 데이터 추출 (기존 로직 유지)
-    longitude = raw_data.get('longitude', '')
-    latitude = raw_data.get('latitude', '')
+    # -------------------
+    # 필드값 설정 및 요청된 로직 적용
+    # -------------------
     
-    # [새로운 로직] '직거래' 열 데이터 생성
-    is_direct_trade = raw_data.get('isDirectTrade')
-    direct_trade_listing = "직거래" if is_direct_trade is True else "" # 값이 True일 경우에만 '직거래' 표기
+    # 1. 가격변동 (priceChangeState)
+    price_change_state_raw = raw_data.get('priceChangeState', '')
+    price_change_display = ""
+    if price_change_state_raw == "UP":
+        price_change_display = "상승"
+    elif price_change_state_raw == "DOWN":
+        price_change_display = "하락"
     
-    # [최적화된 로직] "인증광고" 열 데이터 생성 (기존 로직 유지)
+    # 2. 집주인 (verificationTypeCode)
+    is_owner_listing = "집주인" if property_data.get('is_owner_flag') is True else ""
+    
+    # 3. 인증광고 (tradeCheckedByOwner)
     trade_checked_by_owner = raw_data.get('tradeCheckedByOwner')
-    
-    # 값이 Boolean True, 문자열 'True', 'Y', '1' 인 경우 모두 '인증광고'로 판단
     is_certified = (trade_checked_by_owner is True or 
                     str(trade_checked_by_owner).upper() in ['TRUE', 'Y', '1'])
-                    
     certification_ad = "인증광고" if is_certified else ""
+    
+    # 4. 직거래 (isDirectTrade)
+    is_direct_trade = raw_data.get('isDirectTrade')
+    direct_trade_listing = "직거래" if is_direct_trade is True else ""
 
+    # 5. 사진 유무 (siteImageCount)
+    site_image_count = raw_data.get('siteImageCount', 0)
+    photo_status = "사진있음" if site_image_count >= 1 else ""
+    
+    # 6. 등록일자 형식 변환
+    date_str = raw_data.get('articleConfirmYmd', '')
+    if date_str and len(date_str) == 8 and date_str.isdigit():
+        registration_date = f"{date_str[:4]}.{date_str[4:6]}.{date_str[6:8]}"
+    else:
+        registration_date = date_str or "Unknown"
+
+    # -------------------
+    # 최종 20개 열 데이터 리스트 생성
+    # -------------------
     return [
         property_data.get('complex_name', ''),  # 1. 단지명
-        trade_type,  # 2. 거래구분
-        raw_data.get('buildingName', ''),  # 3. 동
-        raw_data.get('floorInfo', ''),  # 4. 층수
-        area,  # 5. 면적
-        price,  # 6. 가격
-        '',  # 7. 가격변동
-        1,  # 8. 중복업소
-        broker_name,  # 9. 중개업소 (realtorName, 원본 그대로)
-        broker_id, # 10. 중개업소ID (realtorId) <--- NEW
-        registration_date,  # 11. 등록일자
-        special_notes_str,  # 12. 특기사항
-        direct_trade_listing, # 13. 직거래 <--- NEW
-        raw_data.get('cpName', '') or 'Unknown',  # 14. 제공
-        is_owner_listing, # 15. 집주인
-        longitude, # 16. 경도
-        latitude,  # 17. 위도
-        raw_data.get('articleNo', ''),  # 18. 매물번호
-        certification_ad # 19. 인증광고
+        trade_type,                             # 2. 거래구분
+        raw_data.get('buildingName', ''),       # 3. 동
+        raw_data.get('floorInfo', ''),          # 4. 층수
+        area,                                   # 5. 면적
+        price,                                  # 6. 가격
+        price_change_display,                   # 7. 가격변동 (상승/하락)
+        1,                                      # 8. 중복업소 (고정)
+        raw_data.get('realtorName', 'Unknown'), # 9. 중개업소
+        raw_data.get('realtorId', ''),          # 10. 중개업소ID
+        registration_date,                      # 11. 등록일자
+        raw_data.get('direction', ''),          # 12. 방향
+        raw_data.get('articleFeatureDesc', ''), # 13. 특기사항
+        raw_data.get('cpName', 'Unknown'),      # 14. 제공
+        is_owner_listing,                       # 15. 집주인
+        direct_trade_listing,                   # 16. 직거래
+        photo_status,                           # 17. 사진 유무
+        raw_data.get('longitude', ''),          # 18. 경도
+        raw_data.get('latitude', ''),           # 19. 위도
+        raw_data.get('articleNo', ''),          # 20. 매물번호
+        certification_ad                        # 21. 인증광고 (총 21개)
     ]
 
 
@@ -418,11 +423,22 @@ async def main():
     worksheet.clear()
     debug_log("기존 데이터 삭제 완료", "SUCCESS")
     
-    # ⭐ 헤더 수정: '중개업소ID'와 '직거래' 열 추가 (총 19개 열)
-    headers = ["단지명", "거래구분", "동", "층수", "면적", "가격", "가격변동",  
-               "중복업소", "중개업소", "중개업소ID", "등록일자", "특기사항", "직거래", "제공", "집주인", 
-               "경도", "위도", "매물번호", "인증광고"]  
-    debug_log(f"헤더 추가 중: {headers}", "DEBUG")
+    # ⭐ 최종 21개 열 헤더 정의
+    headers = [
+        "단지명", "거래구분", "동", "층수", "면적", "가격", 
+        "가격변동", # 7
+        "중복업소", 
+        "중개업소", "중개업소ID", # 10
+        "등록일자", 
+        "방향", # 12
+        "특기사항", # 13
+        "제공", "집주인", 
+        "직거래", # 16
+        "사진 유무", # 17
+        "경도", "위도", "매물번호", 
+        "인증광고" # 21
+    ]
+    debug_log(f"헤더 추가 중 (총 {len(headers)}개 열): {headers}", "DEBUG")
     worksheet.append_row(headers)
     debug_log("헤더 추가 완료", "SUCCESS")
     
@@ -461,25 +477,25 @@ async def main():
                 debug_log(f"\n🔍 {complex_info['name']} - 디버깅 샘플 출력 (최대 5개):", "DEBUG")
                 
                 for i, prop in enumerate(result['properties']):
+                    raw_data = prop.get('raw_data', {})
+                    formatted_row = format_property_data(prop)
+                    
                     if i < 5:
-                        raw_data = prop.get('raw_data', {})
+                        # 디버그 로그 출력
                         debug_log(f"--- 매물 샘플 #{i+1} (Article No: {prop.get('article_no', 'N/A')}) ---", "INFO")
-                        # API 필드 기반 확인 결과 출력
-                        debug_log(f"Raw Data 필드: verificationTypeCode = {raw_data.get('verificationTypeCode', 'N/A')}", "INFO")
-                        debug_log(f"Raw Data 필드: tradeCheckedByOwner = {raw_data.get('tradeCheckedByOwner', 'N/A')}", "INFO") # ⭐ 인증광고 필드 출력
-                        debug_log(f"Raw Data 필드: isDirectTrade = {raw_data.get('isDirectTrade', 'N/A')}", "INFO") # 직거래 필드 출력
+                        debug_log(f"Raw Data 필드: priceChangeState = {raw_data.get('priceChangeState', 'N/A')}", "INFO")
+                        debug_log(f"Raw Data 필드: tradeCheckedByOwner = {raw_data.get('tradeCheckedByOwner', 'N/A')}", "INFO") 
+                        debug_log(f"Raw Data 필드: isDirectTrade = {raw_data.get('isDirectTrade', 'N/A')}", "INFO") 
                         
                         # 요청에 따라 tradeCheckedByOwner가 false인 경우 로그 기록
                         if raw_data.get('tradeCheckedByOwner') is False:
                              debug_log(f"⚠️  tradeCheckedByOwner 값이 False로 기록됨.", "WARNING")
                         
-                        debug_log("API Raw Data (원본 JSON):", "INFO")
-                        # 불필요한 전체 JSON 출력 대신, 핵심 필드만 출력하도록 조정할 수도 있지만, 원본 그대로 유지
-                        print(json.dumps(raw_data, indent=2, ensure_ascii=False))
-                        
-                    # 데이터 포맷팅
-                    formatted_row = format_property_data(prop)
-                    if len(formatted_row) == 19: # 총 19개 열
+                        # 최종 시트 데이터 미리보기 (가격변동 포함)
+                        debug_log(f"최종 데이터 (가격변동: {formatted_row[6]}, 방향: {formatted_row[11]}, 사진: {formatted_row[16]})", "DEBUG")
+
+                    # 데이터 포맷팅 및 시트 추가
+                    if len(formatted_row) == len(headers): 
                         rows_to_append.append(formatted_row)
             
             # 🚀 해당 단지의 매물을 시트에 즉시 기록
