@@ -7,7 +7,8 @@ GitHub Actions용 네이버 부동산 크롤러 (최종 통합 버전)
 - '중개업소ID' (realtorId) 및 '직거래' (isDirectTrade) 열 추가
 - '방향' (direction), '사진 유무' (siteImageCount), '특기사항' (articleFeatureDesc) 열 추가
 - '가격변동' (priceChangeState) 필드 값을 '상승'/'하락'으로 표시 (색상 시각화는 시트의 조건부 서식 권장)
-- 총 20개 열
+- 총 21개 열
+- ※ 추출/업로드 로직(Playwright/Sheets append)은 변경하지 않음. 파싱 보강만 적용.
 """
 
 import asyncio
@@ -96,6 +97,158 @@ def setup_google_sheets():
         debug_log(f"구글 시트 설정 실패: {str(e)}", "ERROR")
         debug_log(f"상세 에러:\n{traceback.format_exc()}", "DEBUG")
         return None
+
+
+# =========================
+# 파싱/보정 헬퍼 (추가)
+# =========================
+def _truthy(val):
+    """다양한 형식(True/'true'/'Y'/'1' 등)을 True로 인식"""
+    if isinstance(val, bool):
+        return val
+    if val is None:
+        return False
+    s = str(val).strip().lower()
+    return s in ("true", "y", "1", "yes")
+
+def _to_int(val, default=0):
+    """문자열/숫자 혼용된 count를 안전하게 정수 변환"""
+    try:
+        if val is None:
+            return default
+        if isinstance(val, (int, float)):
+            return int(val)
+        s = str(val).strip().replace(",", "")
+        return int(float(s))
+    except Exception:
+        return default
+
+def _digits_or_empty(val):
+    """아이디처럼 숫자 문자열이 들어오는 경우만 반환(그 외는 '')"""
+    s = str(val).strip()
+    return s if s.isdigit() else ""
+
+def _extract_realtor_id(raw):
+    """
+    realtorId가 누락/변형된 경우까지 최대한 보정:
+      - 'realtorId', 'realtorIdStr', 'realtorNo', 'realEstateAgentNo', 'agentNo' 등 시도
+      - 'realtorLinkUrl' 내 쿼리스트링에서 realtorId= 추출 시도
+    """
+    for k in ("realtorId", "realtorIdStr", "realtorNo", "realEstateAgentNo", "agentNo", "realtorIdNo"):
+        if k in raw and raw[k]:
+            did = _digits_or_empty(raw[k])
+            if did:
+                return did
+    url = raw.get("realtorLinkUrl") or raw.get("realtorUrl") or ""
+    if "realtorId=" in str(url):
+        try:
+            m = re.search(r"[?&]realtorId=(\d+)", url)
+            if m:
+                return m.group(1)
+        except Exception:
+            pass
+    return ""
+
+def _has_photos(raw):
+    """
+    사진 보유 여부를 여러 필드로 견고하게 판단
+    - 우선순위: siteImageCount / representativeImageCount / imageCount
+    - 보조: siteImageCountYn / representativeImageExistYn 등 불리언/플래그형
+    """
+    for k in ("siteImageCount", "representativeImageCount", "imageCount"):
+        if k in raw:
+            if _to_int(raw.get(k), 0) > 0:
+                return True
+    for k in ("siteImageCountYn", "representativeImageExistYn"):
+        if k in raw and _truthy(raw.get(k)):
+            return True
+    return False
+
+def _parse_price_number(s):
+    """'12,345' '1.2억' 등 다양한 가격 문자열을 대략적인 정수(만원 단위)로 변환"""
+    if s is None:
+        return None
+    t = str(s).strip()
+    try:
+        if "억" in t:
+            parts = t.replace(" ", "").split("억")
+            eok = parts[0]
+            rest = parts[1] if len(parts) > 1 else ""
+            base = int(float(eok)) * 10000
+            rest = rest.replace(",", "").replace("만", "")
+            add = int(rest) if rest.isdigit() else 0
+            return base + add
+        return int(float(t.replace(",", "").replace("만", "")))
+    except Exception:
+        return None
+
+def _resolve_price_change(raw):
+    """
+    가격변동 표시를 최대한 정확히 결정:
+      1) priceChangeState == 'UP'/'DOWN' 이면 '상승'/'하락'
+      2) priceChangeState가 boolean True 또는 'Y'/'1' 등일 때:
+         - 보조 키들에서 방향성 추론 (priceChangeType, dealPriceChangeTypeCode 등)
+         - 숫자 변화량(priceChange, priceChangeAmount) 또는 과거/현재 가격 비교로 방향성 추론
+      3) 어느 것도 없으면 '변동'으로 표기
+    """
+    v = raw.get("priceChangeState")
+
+    # 1) 명시적 UP/DOWN 문자열
+    if isinstance(v, str) and v:
+        updown = v.strip().upper()
+        if updown == "UP":
+            return "상승"
+        if updown == "DOWN":
+            return "하락"
+        # 'TRUE'/'Y' 등의 경우는 아래로
+
+    changed = _truthy(v)
+    if not changed:
+        return ""  # 변동 없음
+
+    # 2) 보조 코드 필드에서 방향 추론
+    for k in ("priceChangeType", "dealPriceChangeTypeCode", "rentPriceChangeTypeCode", "priceChangeDirection"):
+        s = raw.get(k)
+        if isinstance(s, str):
+            su = s.upper()
+            if "UP" in su:
+                return "상승"
+            if "DOWN" in su:
+                return "하락"
+
+    # 2-1) 수치 변화량 부호로 판단
+    for k in ("priceChange", "priceChangeAmount"):
+        delta = raw.get(k)
+        if delta is not None:
+            try:
+                d = float(str(delta).replace(",", ""))
+                if d > 0:
+                    return "상승"
+                if d < 0:
+                    return "하락"
+            except Exception:
+                pass
+
+    # 2-2) 과거/현재 가격 비교로 판단
+    prev_candidates = ("previousDealOrWarrantPrc", "prevPrice", "previousPrice")
+    curr_candidates = ("dealOrWarrantPrc", "price", "currentPrice")
+    prev_val = None
+    curr_val = None
+    for pk in prev_candidates:
+        pv = _parse_price_number(raw.get(pk))
+        if pv is not None:
+            prev_val = pv
+            break
+    for ck in curr_candidates:
+        cv = _parse_price_number(raw.get(ck))
+        if cv is not None:
+            curr_val = cv
+            break
+    if prev_val is not None and curr_val is not None and prev_val != curr_val:
+        return "상승" if curr_val > prev_val else "하락"
+
+    # 3) 방향 판단 불가 시 '변동'
+    return "변동"
 
 
 class AggressiveCardScroll:
@@ -309,13 +462,16 @@ class AggressiveCardScroll:
 
 def format_property_data(property_data):
     """
-    매물 데이터 포맷팅 및 새로운 필드 ('방향', '사진유무', '특기사항', '가격변동', '중개업소ID', '직거래') 적용
-    총 20개 열을 반환합니다.
+    매물 데이터 포맷팅 및 보완된 필드 적용
+    - 사진 유무: 다양한 키/형식 대응(_has_photos)
+    - 중개업소ID: 여러 키/URL에서 보정 추출(_extract_realtor_id)
+    - 가격변동: boolean True일 때도 방향(상승/하락) 추론(_resolve_price_change)
+    총 21개 열을 반환합니다.
     """
     raw_data = property_data.get('raw_data', {})
-    
+
     # -------------------
-    # 면적 정보 처리
+    # 면적 정보 처리 (기존 로직과 동등한 결과 유지)
     # -------------------
     area1 = raw_data.get('area1', '')
     area2 = raw_data.get('area2', '')
@@ -327,7 +483,7 @@ def format_property_data(property_data):
         area = raw_data.get('areaName', '') + "m²" or "Unknown"
     
     # -------------------
-    # 가격 정보 처리
+    # 가격 정보 처리 (월세 보증금/월세 조합 유지)
     # -------------------
     trade_type = raw_data.get('tradeTypeName', '')
     price = raw_data.get('dealOrWarrantPrc', '')
@@ -340,45 +496,38 @@ def format_property_data(property_data):
             price = deposit
         elif monthly:
             price = f"{monthly}만원"
-    
-    # -------------------
-    # 필드값 설정 및 요청된 로직 적용
-    # -------------------
-    
-    # 1. 가격변동 (priceChangeState)
-    price_change_state_raw = raw_data.get('priceChangeState', '')
-    price_change_display = ""
-    if price_change_state_raw == "UP":
-        price_change_display = "상승"
-    elif price_change_state_raw == "DOWN":
-        price_change_display = "하락"
-    
-    # 2. 집주인 (verificationTypeCode)
-    is_owner_listing = "집주인" if property_data.get('is_owner_flag') is True else ""
-    
-    # 3. 인증광고 (tradeCheckedByOwner)
-    trade_checked_by_owner = raw_data.get('tradeCheckedByOwner')
-    is_certified = (trade_checked_by_owner is True or 
-                    str(trade_checked_by_owner).upper() in ['TRUE', 'Y', '1'])
-    certification_ad = "인증광고" if is_certified else ""
-    
-    # 4. 직거래 (isDirectTrade)
-    is_direct_trade = raw_data.get('isDirectTrade')
-    direct_trade_listing = "직거래" if is_direct_trade is True else ""
 
-    # 5. 사진 유무 (siteImageCount)
-    site_image_count = raw_data.get('siteImageCount', 0)
-    photo_status = "사진있음" if site_image_count >= 1 else ""
-    
-    # 6. 등록일자 형식 변환
+    # -------------------
+    # 보완된 필드들
+    # -------------------
+    # (1) 가격변동
+    price_change_display = _resolve_price_change(raw_data)
+
+    # (2) 집주인
+    is_owner_listing = "집주인" if property_data.get('is_owner_flag') is True else ""
+
+    # (3) 인증광고
+    is_certified = _truthy(raw_data.get('tradeCheckedByOwner'))
+    certification_ad = "인증광고" if is_certified else ""
+
+    # (4) 직거래
+    direct_trade_listing = "직거래" if _truthy(raw_data.get('isDirectTrade')) else ""
+
+    # (5) 사진 유무
+    photo_status = "사진있음" if _has_photos(raw_data) else ""
+
+    # (6) 등록일자 형식 변환
     date_str = raw_data.get('articleConfirmYmd', '')
-    if date_str and len(date_str) == 8 and date_str.isdigit():
-        registration_date = f"{date_str[:4]}.{date_str[4:6]}.{date_str[6:8]}"
+    if date_str and len(str(date_str)) == 8 and str(date_str).isdigit():
+        registration_date = f"{str(date_str)[:4]}.{str(date_str)[4:6]}.{str(date_str)[6:8]}"
     else:
         registration_date = date_str or "Unknown"
 
+    # (7) 중개업소ID 보정
+    realtor_id = _extract_realtor_id(raw_data)
+
     # -------------------
-    # 최종 20개 열 데이터 리스트 생성
+    # 최종 21개 열 데이터 리스트
     # -------------------
     return [
         property_data.get('complex_name', ''),  # 1. 단지명
@@ -387,21 +536,21 @@ def format_property_data(property_data):
         raw_data.get('floorInfo', ''),          # 4. 층수
         area,                                   # 5. 면적
         price,                                  # 6. 가격
-        price_change_display,                   # 7. 가격변동 (상승/하락)
+        price_change_display,                   # 7. 가격변동 (상승/하락/변동/빈칸)
         1,                                      # 8. 중복업소 (고정)
         raw_data.get('realtorName', 'Unknown'), # 9. 중개업소
-        raw_data.get('realtorId', ''),          # 10. 중개업소ID
-        registration_date,                      # 11. 등록일자
+        realtor_id,                              # 10. 중개업소ID (보강)
+        registration_date,                       # 11. 등록일자
         raw_data.get('direction', ''),          # 12. 방향
         raw_data.get('articleFeatureDesc', ''), # 13. 특기사항
         raw_data.get('cpName', 'Unknown'),      # 14. 제공
         is_owner_listing,                       # 15. 집주인
         direct_trade_listing,                   # 16. 직거래
-        photo_status,                           # 17. 사진 유무
+        photo_status,                           # 17. 사진 유무 (보강)
         raw_data.get('longitude', ''),          # 18. 경도
         raw_data.get('latitude', ''),           # 19. 위도
         raw_data.get('articleNo', ''),          # 20. 매물번호
-        certification_ad                        # 21. 인증광고 (총 21개)
+        certification_ad                        # 21. 인증광고
     ]
 
 
