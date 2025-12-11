@@ -563,7 +563,7 @@ COLOR_압구정원 = {"red": 0.812, "green": 0.886, "blue": 0.953}
 COLOR_집주인_TEXT = {"red": 0.416, "green": 0.659, "blue": 0.310}
 COLOR_저빈도_TEXT = {"red": 0.800, "green": 0.000, "blue": 0.000}
 
-EXCLUDED_COMPLEXES = ["메이플자이", "트리마제"]
+EXCLUDED_COMPLEXES = ["메이플자이", "트리마제", "한남더힐", "압구정하이츠파크"]
 ALIAS_SHEET_NAME = "압구정 중개업소"
 ALIAS_HEADER_NAME = "중개업소명"
 ALIAS_HEADER_ID = "중개업소ID"
@@ -733,7 +733,7 @@ def get_brokerage_counts(final_rows):
             cnt[name] = cnt.get(name, 0) + 1
     return cnt
 
-def apply_styles_and_alignment(sheet_service, spreadsheet_id, sheet_id, infos, header_row, col_count, brokerage_counts):
+def apply_styles_and_alignment(sheet_service, spreadsheet_id, sheet_id, infos, header_row, col_count, brokerage_counts, alias):
     try:
         row_count = len(infos)
         if not row_count:
@@ -807,13 +807,25 @@ def apply_styles_and_alignment(sheet_service, spreadsheet_id, sheet_id, infos, h
                         end = start + len(name)
                         if end <= len(joined):
                             was_owner = it["상태"].get(name, False)
-                            low = (complex_name not in EXCLUDED_COMPLEXES and 
-                                   brokerage_counts.get(name, 0) <= LOW_FREQUENCY_THRESHOLD)
-                            if was_owner:
-                                color = COLOR_집주인_TEXT
-                            elif low:
-                                color = COLOR_저빈도_TEXT
+                            
+                            # 제외 단지가 아니면 색상 체크
+                            if complex_name not in EXCLUDED_COMPLEXES:
+                                # 압구정 중개업소 시트의 "중개업소명" 열에 없는 업소명 확인
+                                not_in_alias = name not in alias.get("byName", {})
+                                # 저빈도 업소 확인
+                                low = brokerage_counts.get(name, 0) <= LOW_FREQUENCY_THRESHOLD
+                                
+                                if was_owner:
+                                    color = COLOR_집주인_TEXT
+                                elif not_in_alias:
+                                    # 압구정 중개업소 시트에 없는 업소명 → 빨간색
+                                    color = COLOR_저빈도_TEXT
+                                elif low:
+                                    color = COLOR_저빈도_TEXT
+                                else:
+                                    color = None
                             else:
+                                # 제외 단지는 색상 적용 안 함
                                 color = None
                             if color:
                                 rich_text_runs.append({
@@ -968,7 +980,7 @@ def process_real_estate_data(spreadsheet, worksheet, sheet_service, spreadsheet_
             print("데이터 쓰기 완료")
         apply_styles_and_alignment(
             sheet_service, spreadsheet_id, main_sheet_id,
-            final_data_infos, header_row, col_count, brokerage_counts
+            final_data_infos, header_row, col_count, brokerage_counts, alias
         )
         print("=== 부동산데이터처리 완료 ===")
         print(f"총 매물: {len(final_data_rows)}개")
