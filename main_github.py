@@ -699,6 +699,11 @@ def process_duplicate_listings(rows, alias):
         if display_name:
             prev = item_map[key]["상태"].get(display_name, False)
             item_map[key]["상태"][display_name] = prev or owner
+            # 원본 중개업소명 저장 (빨간색 체크용)
+            if display_name not in item_map[key].get("원본명", {}):
+                if "원본명" not in item_map[key]:
+                    item_map[key]["원본명"] = {}
+                item_map[key]["원본명"][display_name] = raw_name
     for key, info in item_map.items():
         row = info["대표행"]
         names = list(info["상태"].keys())
@@ -714,7 +719,8 @@ def process_duplicate_listings(rows, alias):
             "중복여부": dup > 1,
             "거래구분": row[COL_거래구분] if len(row) > COL_거래구분 else "",
             "압구정원포함": has_apgujeong_one,
-            "상태": info["상태"]
+            "상태": info["상태"],
+            "원본명": info.get("원본명", {})  # 원본 중개업소명 매핑
         })
     return {
         "finalDataRows": [x["행"] for x in infos],
@@ -810,8 +816,11 @@ def apply_styles_and_alignment(sheet_service, spreadsheet_id, sheet_id, infos, h
                             
                             # 제외 단지가 아니면 색상 체크
                             if complex_name not in EXCLUDED_COMPLEXES:
+                                # 원본 중개업소명 가져오기 (변환 전 값)
+                                원본명 = it.get("원본명", {}).get(name, name)
                                 # 압구정 중개업소 시트의 "중개업소명" 열에 없는 업소명 확인
-                                not_in_alias = name not in alias.get("byName", {})
+                                # 변환이 안 되었다면(원본명이 그대로라면) alias에 없음
+                                not_in_alias = 원본명 not in alias.get("byName", {})
                                 # 저빈도 업소 확인
                                 low = brokerage_counts.get(name, 0) <= LOW_FREQUENCY_THRESHOLD
                                 
