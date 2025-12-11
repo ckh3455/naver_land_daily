@@ -412,36 +412,72 @@ class AggressiveCardScroll:
             raise
 
     async def aggressive_scroll(self):
-        """개선된 스크롤: 스크롤 컨테이너 방식"""
+        """개선된 스크롤: 컨테이너 높이 변화 감지 방식"""
         debug_log("=== 스크롤 컨테이너 방식 스크롤 시작 ===", "STEP")
         
-        safety_rounds = 0
-        SAFETY_MAX_ROUNDS = 50
+        last_height = 0
+        no_height_change_count = 0
+        MAX_NO_CHANGE = 3  # 높이가 3번 연속 안 바뀌면 종료
+        scroll_attempts = 0
         
-        while self.more_data and safety_rounds < SAFETY_MAX_ROUNDS:
+        while self.more_data:
             prev_count = len(self.property_cards)
             
             try:
-                # 스크롤 컨테이너 스크롤 (1000px씩)
+                # 현재 컨테이너 상태 확인
+                container_state = await self.page.evaluate("""
+                    () => {
+                        const container = document.querySelector('.item_list--article');
+                        if (!container) return { success: false };
+                        
+                        return {
+                            success: true,
+                            scrollHeight: container.scrollHeight,
+                            scrollTop: container.scrollTop,
+                            clientHeight: container.clientHeight
+                        };
+                    }
+                """)
+                
+                if not container_state['success']:
+                    debug_log("⚠️ 스크롤 컨테이너를 찾지 못함", "WARNING")
+                    break
+                
+                current_height = container_state['scrollHeight']
+                is_at_bottom = (container_state['scrollTop'] + container_state['clientHeight']) >= (current_height - 10)
+                
+                # 높이 변화 확인
+                if current_height == last_height and is_at_bottom:
+                    no_height_change_count += 1
+                    debug_log(f"⚠️ 컨테이너 높이 변화 없음 ({no_height_change_count}/{MAX_NO_CHANGE})", "WARNING")
+                    
+                    if no_height_change_count >= MAX_NO_CHANGE:
+                        if not self.more_data:
+                            debug_log("⏹️ isMoreData=False + 높이 변화 없음 → 종료", "INFO")
+                            break
+                        else:
+                            debug_log("⚠️ 높이 변화 없지만 isMoreData=True → 10초 추가 대기", "WARNING")
+                            await asyncio.sleep(10)
+                            no_height_change_count = 0  # 리셋하고 재시도
+                else:
+                    no_height_change_count = 0
+                    if current_height > last_height:
+                        debug_log(f"📈 컨테이너 확장: {last_height} → {current_height} (+{current_height - last_height}px)", "SUCCESS")
+                    last_height = current_height
+                
+                # 스크롤 실행
                 scroll_result = await self.page.evaluate("""
                     () => {
                         const container = document.querySelector('.item_list--article');
                         if (container) {
                             const before = container.scrollTop;
-                            const scrollHeight = container.scrollHeight;
-                            const clientHeight = container.clientHeight;
-                            
-                            // 1000px 스크롤
                             container.scrollTop += 1000;
-                            
                             const after = container.scrollTop;
-                            const isBottom = after >= (scrollHeight - clientHeight - 10);
                             
                             return {
                                 success: true,
                                 scrolled: after - before,
-                                isBottom: isBottom,
-                                progress: (after / (scrollHeight - clientHeight) * 100).toFixed(1)
+                                progress: ((after / (container.scrollHeight - container.clientHeight)) * 100).toFixed(1)
                             };
                         }
                         return { success: false };
@@ -449,38 +485,36 @@ class AggressiveCardScroll:
                 """)
                 
                 if scroll_result['success']:
-                    debug_log(f"🔄 스크롤: {scroll_result['scrolled']}px (진행률: {scroll_result['progress']}%)", "DEBUG")
-                    
-                    # 스크롤 후 API 응답 대기
-                    await asyncio.sleep(2)
-                    
-                    # 새 매물 확인
-                    if len(self.property_cards) > prev_count:
-                        new_count = len(self.property_cards) - prev_count
-                        debug_log(f"🎉 새 매물 {new_count}개 추가! (총 {len(self.property_cards)}개)", "SUCCESS")
-                    
-                    # 끝에 도달하면 추가 대기
-                    if scroll_result['isBottom']:
-                        debug_log("📍 스크롤 끝 도달, 추가 대기 중...", "INFO")
-                        await asyncio.sleep(3)
-                        
-                        # 한 번 더 확인
-                        if not self.more_data:
-                            debug_log("⏹️ isMoreData=False 확인, 스크롤 종료", "INFO")
-                            break
-                else:
-                    debug_log("⚠️ 스크롤 컨테이너를 찾지 못함", "WARNING")
+                    scroll_attempts += 1
+                    debug_log(f"🔄 [{scroll_attempts}] 스크롤: {scroll_result['scrolled']}px (진행률: {scroll_result['progress']}%)", "DEBUG")
+                
+                # API 응답 적극 대기
+                try:
+                    await self.page.wait_for_response(
+                        lambda r: 'api/articles/complex' in r.url and 'page=' in r.url,
+                        timeout=3000
+                    )
+                    debug_log("📡 API 응답 감지!", "SUCCESS")
+                except:
+                    pass
+                
+                await asyncio.sleep(1.5)
+                
+                # 새 매물 확인
+                if len(self.property_cards) > prev_count:
+                    new_count = len(self.property_cards) - prev_count
+                    debug_log(f"🎉 새 매물 {new_count}개 추가! (총 {len(self.property_cards)}개)", "SUCCESS")
+                
+                # 안전 장치 (최대 100회 스크롤 시도)
+                if scroll_attempts >= 100:
+                    debug_log(f"⛔ 안전중단: 100회 스크롤 시도 초과 (총 {len(self.property_cards)}개 수집)", "WARNING")
                     break
                     
             except Exception as e:
                 debug_log(f"스크롤 중 오류: {str(e)}", "WARNING")
-            
-            safety_rounds += 1
+                await asyncio.sleep(2)
         
-        if safety_rounds >= SAFETY_MAX_ROUNDS:
-            debug_log(f"⛔ 안전중단: {SAFETY_MAX_ROUNDS}회 초과", "WARNING")
-        else:
-            debug_log("✅ 스크롤 완료", "SUCCESS")
+        debug_log(f"✅ 스크롤 완료 (총 {len(self.property_cards)}개 수집, {scroll_attempts}회 시도)", "SUCCESS")
 
     async def close_browser(self):
         """브라우저 종료"""
