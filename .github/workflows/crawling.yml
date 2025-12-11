@@ -46,6 +46,20 @@ jobs:
         playwright install chromium
         playwright install-deps chromium
     
+    - name: 파일 목록 확인 (디버깅)
+      run: |
+        echo "=== 현재 디렉토리 ==="
+        pwd
+        echo ""
+        echo "=== 전체 파일 목록 ==="
+        ls -la
+        echo ""
+        echo "=== Python 파일 목록 ==="
+        find . -name "*.py" -type f | head -20 || echo "Python 파일 없음"
+        echo ""
+        echo "=== 루트 디렉토리 Python 파일 ==="
+        ls -la *.py 2>/dev/null || echo "루트에 Python 파일 없음"
+    
     - name: 서비스 계정 키 생성
       run: |
         cat << 'EOF' > service_account.json
@@ -58,7 +72,31 @@ jobs:
       env:
         SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
       run: |
-        python crawler_with_processor.py
+        echo "=== 크롤러 파일 찾기 ==="
+        if [ -f "main_github.py" ]; then
+          echo "✅ main_github.py 발견"
+          python main_github.py
+        elif [ -f "crawler_with_processor.py" ]; then
+          echo "✅ crawler_with_processor.py 발견"
+          python crawler_with_processor.py
+        elif [ -f "naver_crawler_playwright.py" ]; then
+          echo "⚠️  main_github.py를 찾을 수 없습니다."
+          echo "⚠️  naver_crawler_playwright.py를 사용합니다."
+          python naver_crawler_playwright.py
+        else
+          echo "❌ 오류: 크롤러 파일을 찾을 수 없습니다!"
+          echo ""
+          echo "현재 디렉토리의 Python 파일:"
+          ls -la *.py 2>/dev/null || echo "  (없음)"
+          echo ""
+          echo "하위 디렉토리의 Python 파일:"
+          find . -name "*.py" -type f | head -10
+          echo ""
+          echo "💡 해결 방법:"
+          echo "   1. GitHub 저장소에 main_github.py 파일을 업로드하세요"
+          echo "   2. 또는 저장소 루트에 파일이 있는지 확인하세요"
+          exit 1
+        fi
     
     - name: 크롤링 결과 업로드
       uses: actions/upload-artifact@v4
