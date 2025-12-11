@@ -1,7 +1,4 @@
-# 수정된 스크립트를 파일로 저장
-import os
-
-script_content = '''#!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 GitHub Actions용 네이버 부동산 크롤러 (스크롤 방식 개선)
 - 스크롤 컨테이너 방식으로 변경 (.item_list--article)
@@ -90,7 +87,7 @@ def setup_google_sheets():
 
     except Exception as e:
         debug_log(f"구글 시트 설정 실패: {str(e)}", "ERROR")
-        debug_log(f"상세 에러:\\n{traceback.format_exc()}", "DEBUG")
+        debug_log(f"상세 에러:\n{traceback.format_exc()}", "DEBUG")
         return None
 
 
@@ -334,7 +331,7 @@ class AggressiveCardScroll:
         """API 응답에서 매물 데이터 추출"""
         if isinstance(data, dict) and 'articleList' in data:
             articles = data['articleList']
-            page_match = re.search(r'page=(\\d+)', url)
+            page_match = re.search(r'page=(\d+)', url)
             page_num = page_match.group(1) if page_match else "Unknown"
 
             new_properties = 0
@@ -594,10 +591,10 @@ def format_property_data(property_data):
 
 async def main():
     """메인 실행 함수"""
-    print("\\n" + "="*70)
+    print("\n" + "="*70)
     print("🚀 네이버 부동산 크롤러 시작 (개선된 스크롤 방식)")
     print(f"⏰ 시작시간: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print("="*70 + "\\n")
+    print("="*70 + "\n")
 
     # 1) 구글 시트 연결
     debug_log("=== 1단계: 구글 시트 연결 및 초기화 ===", "STEP")
@@ -629,7 +626,7 @@ async def main():
     total_start_time = time.time()
 
     for idx, complex_info in enumerate(COMPLEXES, 1):
-        debug_log(f"\\n{'#'*70}", "STEP")
+        debug_log(f"\n{'#'*70}", "STEP")
         debug_log(f"📍 [{idx}/{len(COMPLEXES)}] {complex_info['name']} ({complex_info['id']})", "STEP")
         debug_log(f"{'#'*70}", "STEP")
 
@@ -677,7 +674,7 @@ async def main():
     total_duration = total_end_time - total_start_time
     total_properties = sum(r['property_count'] for r in results)
 
-    print("\\n" + "="*70)
+    print("\n" + "="*70)
     print("📊 전체 결과 요약")
     print("="*70)
     print(f"⏰ 종료시간: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -695,29 +692,10 @@ async def main():
     with open('crawling_results.json', 'w', encoding='utf-8') as f:
         json.dump(result_data, f, ensure_ascii=False, indent=2)
 
-    print("\\n" + "="*70)
+    print("\n" + "="*70)
     print("🎉 크롤링 완료!")
-    print("="*70 + "\\n")
+    print("="*70 + "\n")
 
 
 if __name__ == "__main__":
     asyncio.run(main())
-'''
-
-# 파일로 저장
-with open('naver_crawler_improved.py', 'w', encoding='utf-8') as f:
-    f.write(script_content)
-
-print("="*60)
-print("✅ 수정된 스크립트 저장 완료!")
-print("="*60)
-print("\n📝 파일명: naver_crawler_improved.py")
-print("\n🔄 주요 변경사항:")
-print("  1. navigate_to_complex_page:")
-print("     - '상세매물검색' 버튼 클릭 방식으로 변경")
-print("  2. aggressive_scroll:")
-print("     - '.item_list--article' 컨테이너 스크롤")
-print("     - 1000px씩 반복 스크롤")
-print("     - 진행률 표시")
-print("     - 끝 도달 감지 개선")
-print("\n✅ 다른 부분 (format_property_data, 구글시트 등)은 그대로 유지")
