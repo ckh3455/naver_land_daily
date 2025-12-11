@@ -1,4 +1,4 @@
-name: 네이버 부동산 크롤링
+name: 네이버 부동산 크롤링 및 데이터 정리
 
 on:
   schedule:
@@ -7,7 +7,7 @@ on:
   workflow_dispatch:  # 수동 실행 버튼
 
 jobs:
-  crawl:
+  crawl-and-process:
     runs-on: ubuntu-22.04  # Ubuntu 22.04로 고정 (Playwright 호환성)
     timeout-minutes: 60  # 최대 1시간
     
@@ -21,8 +21,24 @@ jobs:
         python-version: '3.11'
         cache: 'pip'
     
+    - name: 시스템 의존성 설치
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          libnss3 \
+          libatk-bridge2.0-0 \
+          libdrm2 \
+          libxkbcommon0 \
+          libxcomposite1 \
+          libxdamage1 \
+          libxfixes3 \
+          libxrandr2 \
+          libgbm1 \
+          libasound2
+    
     - name: Python 의존성 설치
       run: |
+        python -m pip install --upgrade pip
         pip install -r requirements.txt
     
     - name: Playwright 브라우저 설치
@@ -38,11 +54,11 @@ jobs:
         echo "서비스 계정 파일 생성 완료"
         ls -lh service_account.json
     
-    - name: 크롤링 실행
+    - name: 크롤링 및 데이터 정리 실행
       env:
         SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
       run: |
-        python main_github.py
+        python crawler_with_processor.py
     
     - name: 크롤링 결과 업로드
       uses: actions/upload-artifact@v4
@@ -57,3 +73,4 @@ jobs:
       if: always()
       run: |
         rm -f service_account.json
+
