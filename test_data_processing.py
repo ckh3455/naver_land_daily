@@ -209,6 +209,9 @@ def process_duplicate_listings(rows, alias):
             if "원본명" not in item_map[key]:
                 item_map[key]["원본명"] = {}
             item_map[key]["원본명"][display_name] = raw_name
+            # 디버깅: 처음 몇 개만 로그
+            if len(item_map) <= 3:
+                print(f"[디버깅] 중복통합: display_name={display_name}, raw_name={raw_name}, 변환여부={display_name != raw_name}")
     for key, info in item_map.items():
         row = info["대표행"]
         names = list(info["상태"].keys())
@@ -314,11 +317,17 @@ def apply_styles_and_alignment(sheet_service, spreadsheet_id, sheet_id, infos, h
                 names = [normalize(s) for s in joined.split(",") if normalize(s)]
                 if names:
                     rich_text_runs = []
-                    cursor = 0
-                    for name in names:
-                        start = cursor
-                        end = start + len(name)
-                        if end <= len(joined):
+                    # joined 문자열에서 정확한 위치 찾기
+                    current_pos = 0
+                    for name_idx, name in enumerate(names):
+                        # joined에서 name의 정확한 위치 찾기
+                        name_start = joined.find(name, current_pos)
+                        if name_start == -1:
+                            # 찾을 수 없으면 현재 위치 사용
+                            name_start = current_pos
+                        name_end = name_start + len(name)
+                        
+                        if name_end <= len(joined):
                             was_owner = it["상태"].get(name, False)
                             
                             # 제외 단지가 아니면 색상 체크
@@ -330,29 +339,63 @@ def apply_styles_and_alignment(sheet_service, spreadsheet_id, sheet_id, infos, h
                                 # 저빈도 업소 확인
                                 low = brokerage_counts.get(name, 0) <= LOW_FREQUENCY_THRESHOLD
                                 
+                                # 디버깅 로그 (처음 몇 개만)
+                                if idx < 5 and name_idx == 0:
+                                    print(f"\n[디버깅] 행 {idx+1}: 단지={complex_name}")
+                                    print(f"  표시명='{name}', 원본명='{원본명}'")
+                                    print(f"  was_owner={was_owner}, not_in_alias={not_in_alias}, low={low}")
+                                    print(f"  alias['byName'] 키 개수: {len(alias.get('byName', {}))}")
+                                    print(f"  원본명이 alias에 있는지: {원본명 in alias.get('byName', {})}")
+                                    if 원본명 in alias.get('byName', {}):
+                                        print(f"  매핑된 실제상호: '{alias.get('byName', {}).get(원본명)}'")
+                                    print(f"  저빈도 체크: {name} = {brokerage_counts.get(name, 0)}개 (임계값: {LOW_FREQUENCY_THRESHOLD})")
+                                
                                 if was_owner:
                                     color = COLOR_집주인_TEXT
+                                    if idx < 5 and name_idx == 0:
+                                        print(f"  → 초록색 적용 (집주인)")
                                 elif not_in_alias:
                                     # 압구정 중개업소 시트에 없는 업소명 → 빨간색
                                     color = COLOR_저빈도_TEXT
+                                    if idx < 5 and name_idx == 0:
+                                        print(f"  ✅ 빨간색 적용: '{name}' (원본명 '{원본명}'이 alias에 없음)")
                                 elif low:
                                     color = COLOR_저빈도_TEXT
+                                    if idx < 5 and name_idx == 0:
+                                        print(f"  ✅ 빨간색 적용: '{name}' (저빈도: {brokerage_counts.get(name, 0)}개)")
                                 else:
                                     color = None
+                                    if idx < 5 and name_idx == 0:
+                                        print(f"  → 색상 없음")
                             else:
                                 # 제외 단지는 색상 적용 안 함
                                 color = None
+                            
                             if color:
                                 rich_text_runs.append({
-                                    "startIndex": start,
-                                    "endIndex": end,
+                                    "startIndex": name_start,
+                                    "endIndex": name_end,
                                     "format": {
                                         "foregroundColor": color
                                     }
                                 })
-                            cursor = end + 2
+                            
+                            # 다음 이름 위치로 이동 (", " 고려)
+                            current_pos = name_end
+                            if name_idx < len(names) - 1:  # 마지막이 아니면
+                                comma_pos = joined.find(", ", current_pos)
+                                if comma_pos != -1:
+                                    current_pos = comma_pos + 2
+                                else:
+                                    current_pos = name_end
                     if rich_text_runs:
                         row_num = header_row + 1 + idx
+                        if idx < 5:
+                            print(f"  RichText 적용: {len(rich_text_runs)}개 구간")
+                            for rt in rich_text_runs:
+                                print(f"    [{rt['startIndex']}:{rt['endIndex']}] = '{joined[rt['startIndex']:rt['endIndex']]}'")
+                        
+                        # RichText 형식으로 적용
                         requests.append({
                             "updateCells": {
                                 "range": {
@@ -371,10 +414,11 @@ def apply_styles_and_alignment(sheet_service, spreadsheet_id, sheet_id, infos, h
                                             "textFormat": {
                                                 "foregroundColor": {"red": 0, "green": 0, "blue": 0}
                                             }
-                                        }
+                                        },
+                                        "textFormatRuns": rich_text_runs
                                     }]
                                 }],
-                                "fields": "userEnteredValue.stringValue,userEnteredFormat.textFormat.foregroundColor"
+                                "fields": "userEnteredValue.stringValue,userEnteredFormat.textFormat.foregroundColor,userEnteredFormat.textFormatRuns"
                             }
                         })
         align_cols = min(col_count, 8)
@@ -487,6 +531,9 @@ def process_real_estate_data():
         
         # 매핑 로드
         alias = load_brokerage_alias_maps(sheet_service, spreadsheet_id)
+        print(f"[디버깅] alias['byName'] 샘플 (처음 5개):")
+        for i, (k, v) in enumerate(list(alias.get("byName", {}).items())[:5]):
+            print(f"  {i+1}. '{k}' -> '{v}'")
         
         # 데이터 읽기 (헤더 제외)
         raw_data = values[header_row:]
@@ -505,6 +552,50 @@ def process_real_estate_data():
         # 빈도수 계산
         brokerage_counts = get_brokerage_counts(final_data_rows)
         print(f"중개업소 종류 수: {len(brokerage_counts)}")
+        
+        # 빨간색으로 표시될 업소명 찾기
+        print("\n" + "="*70)
+        print("🔴 빨간색으로 표시될 업소명 목록")
+        print("="*70)
+        red_list = []
+        for idx, it in enumerate(final_data_infos):
+            row = it["행"]
+            complex_name = row[COL_단지명] if len(row) > COL_단지명 else ""
+            
+            # 제외 단지 스킵
+            if complex_name in EXCLUDED_COMPLEXES:
+                continue
+            
+            if len(row) > COL_중개업소:
+                joined = str(row[COL_중개업소] or "")
+                names = [normalize(s) for s in joined.split(",") if normalize(s)]
+                
+                for name in names:
+                    was_owner = it["상태"].get(name, False)
+                    원본명 = it.get("원본명", {}).get(name, name)
+                    not_in_alias = 원본명 not in alias.get("byName", {})
+                    low = brokerage_counts.get(name, 0) <= LOW_FREQUENCY_THRESHOLD
+                    
+                    # 빨간색 조건 확인
+                    if not was_owner and (not_in_alias or low):
+                        reason = "압구정 중개업소 시트에 없음" if not_in_alias else f"저빈도 ({brokerage_counts.get(name, 0)}개)"
+                        red_list.append({
+                            "단지": complex_name,
+                            "표시명": name,
+                            "원본명": 원본명,
+                            "이유": reason,
+                            "행": idx + 2  # 헤더 포함
+                        })
+        
+        if red_list:
+            print(f"총 {len(red_list)}개 업소명이 빨간색으로 표시됩니다:\n")
+            for i, item in enumerate(red_list[:50], 1):  # 최대 50개만 출력
+                print(f"  {i}. [{item['단지']}] '{item['표시명']}' (원본: '{item['원본명']}') - {item['이유']}")
+            if len(red_list) > 50:
+                print(f"\n  ... 외 {len(red_list) - 50}개 더")
+        else:
+            print("빨간색으로 표시될 업소명이 없습니다.")
+        print("="*70 + "\n")
         
         # 데이터 쓰기 준비
         col_count = len(final_data_rows[0]) if final_data_rows else header_col_count
