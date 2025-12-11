@@ -3,6 +3,7 @@
 부동산 데이터 정리 전용 스크립트
 - 크롤링 없이 기존 시트 데이터만 읽어서 정리
 - 모든 정리 규칙 포함 (정렬, 중복 통합, 색상 처리 등)
+- 실행 시간: 약 1-2분 (크롤링 30분 → 1-2분으로 단축!)
 """
 
 import json
@@ -414,12 +415,17 @@ def apply_styles_and_alignment(sheet_service, spreadsheet_id, sheet_id, infos, h
 def process_real_estate_data():
     """부동산 데이터 처리 메인 함수"""
     try:
-        print("=== 부동산데이터처리 시작 ===")
+        print("\n" + "="*70)
+        print("🧪 데이터 정리 로직 테스트 (크롤링 제외)")
+        print("="*70 + "\n")
         
         # 서비스 계정 인증
         service_account_file = 'service_account.json'
         if not os.path.exists(service_account_file):
             print(f"❌ 오류: {service_account_file} 파일을 찾을 수 없습니다.")
+            print("\n💡 해결 방법:")
+            print("   1. GitHub Secrets에서 SERVICE_ACCOUNT_JSON 복사")
+            print(f"   2. {service_account_file} 파일로 저장")
             return
         
         with open(service_account_file, 'r', encoding='utf-8') as f:
@@ -434,6 +440,9 @@ def process_real_estate_data():
         
         # 스프레드시트 ID
         spreadsheet_id = os.getenv('SPREADSHEET_ID', '1FfeV5dkq7MTe443iMIYjztueWcUkv8ngsrDQmEzeTA4')
+        
+        print(f"📊 스프레드시트 ID: {spreadsheet_id}")
+        print("🔄 데이터 정리 시작...\n")
         
         # 시트 정보 가져오기
         sheet_metadata = sheet_service.spreadsheets().get(
@@ -564,15 +573,16 @@ def process_real_estate_data():
             final_data_infos, header_row, col_count, brokerage_counts, alias
         )
         
+        print("\n" + "="*70)
         print("=== 부동산데이터처리 완료 ===")
         print(f"총 매물: {len(final_data_rows)}개")
+        print("="*70 + "\n")
         
     except Exception as e:
-        print(f"오류 발생: {e}")
+        print(f"\n❌ 오류 발생: {e}")
         import traceback
         traceback.print_exc()
         raise
 
 if __name__ == "__main__":
     process_real_estate_data()
-
