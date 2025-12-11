@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
-GitHub Actions용 네이버 부동산 크롤러 (스크롤 방식 개선)
-- 스크롤 컨테이너 방식으로 변경 (.item_list--article)
-- 상세매물검색 버튼 클릭 방식 적용
+GitHub Actions용 네이버 부동산 크롤러 + 데이터 정리 통합 스크립트
+- 크롤링 후 자동으로 데이터 정리까지 수행
 """
 
 import asyncio
@@ -17,7 +16,10 @@ from google.oauth2 import service_account
 import traceback
 import urllib.parse
 
-# 23개 단지 목록
+# ====================================================================
+# 크롤링 관련 코드 (기존 코드)
+# ====================================================================
+
 COMPLEXES = [
     {"id": "728", "name": "미성1차"},
     {"id": "742", "name": "미성2차"},
@@ -46,7 +48,6 @@ COMPLEXES = [
     {"id": "9428", "name": "압구정하이츠파크"}
 ]
 
-
 def debug_log(message, level="INFO"):
     """초상세 디버깅 로그"""
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
@@ -60,7 +61,6 @@ def debug_log(message, level="INFO"):
     }.get(level, "")
     print(f"[{timestamp}] {prefix} {message}")
 
-
 def setup_google_sheets():
     """구글 시트 설정"""
     debug_log("=== 구글 시트 설정 시작 ===", "STEP")
@@ -69,7 +69,7 @@ def setup_google_sheets():
         if not os.path.exists(credentials_file):
             debug_log(f"서비스 계정 파일이 없습니다: {credentials_file}", "ERROR")
             return None
-
+        
         credentials = service_account.Credentials.from_service_account_file(
             credentials_file,
             scopes=['https://www.googleapis.com/auth/spreadsheets']
@@ -77,25 +77,22 @@ def setup_google_sheets():
         gc = gspread.authorize(credentials)
         spreadsheet_id = os.environ.get('SPREADSHEET_ID', '1QP56lm5kPBdsUhrgcgY2U-JdmukXIkKCSxefd1QExKE')
         spreadsheet = gc.open_by_key(spreadsheet_id)
-
+        
         try:
             worksheet = spreadsheet.worksheet("네이버 매물분석")
-            return worksheet
+            return worksheet, spreadsheet
         except gspread.WorksheetNotFound:
             worksheet = spreadsheet.add_worksheet(title="네이버 매물분석", rows=1000, cols=30)
-            return worksheet
-
+            return worksheet, spreadsheet
     except Exception as e:
         debug_log(f"구글 시트 설정 실패: {str(e)}", "ERROR")
         debug_log(f"상세 에러:\n{traceback.format_exc()}", "DEBUG")
-        return None
-
+        return None, None
 
 # =========================
-# 파싱/보정 헬퍼
+# 파싱/보정 헬퍼 (기존 코드)
 # =========================
 def _truthy(val):
-    """다양한 형식(True/'true'/'Y'/'1' 등)을 True로 인식"""
     if isinstance(val, bool):
         return val
     if val is None:
@@ -103,9 +100,7 @@ def _truthy(val):
     s = str(val).strip().lower()
     return s in ("true", "y", "1", "yes")
 
-
 def _to_int(val, default=0):
-    """문자열/숫자 혼용된 count를 안전하게 정수 변환"""
     try:
         if val is None:
             return default
@@ -116,9 +111,7 @@ def _to_int(val, default=0):
     except Exception:
         return default
 
-
 def _id_or_empty(val):
-    """중개업소 ID: 영문/숫자/._- 허용"""
     if val is None:
         return ""
     s = str(val).strip()
@@ -128,28 +121,20 @@ def _id_or_empty(val):
     s = re.sub(r"[^A-Za-z0-9._-]", "", s)
     return s
 
-
 def _to_text_cell(val):
-    """구글시트에서 숫자/지수로 오인하지 않도록 텍스트로 강제"""
     s = _id_or_empty(val)
     return f"'{s}" if s else ""
 
-
 def _extract_realtor_id(raw):
-    """가능한 모든 위치/이름/URL에서 중개업소ID 추출"""
     candidate_keys = (
         "realtorId", "realtorIdStr", "realtorNo", "realEstateAgentNo",
         "agentNo", "realtorIdNo", "agentId", "officeId"
     )
-
-    # 1) 최상위 키
     for k in candidate_keys:
         if k in raw and raw[k]:
             rid = _id_or_empty(raw[k])
             if rid:
                 return rid
-
-    # 2) 서브오브젝트
     for sub in ("realtor", "realtorInfo", "agent", "office"):
         obj = raw.get(sub)
         if isinstance(obj, dict):
@@ -158,8 +143,6 @@ def _extract_realtor_id(raw):
                     rid = _id_or_empty(obj[k])
                     if rid:
                         return rid
-
-    # 3) URL 쿼리
     url = (raw.get("realtorLinkUrl") or raw.get("realtorUrl") or "").strip()
     if url:
         try:
@@ -173,12 +156,9 @@ def _extract_realtor_id(raw):
                         return rid
         except Exception:
             pass
-
     return ""
 
-
 def _has_photos(raw):
-    """사진 보유 여부 판단"""
     for k in ("siteImageCount", "representativeImageCount", "imageCount"):
         if k in raw and _to_int(raw.get(k), 0) > 0:
             return True
@@ -187,9 +167,7 @@ def _has_photos(raw):
             return True
     return False
 
-
 def _parse_price_number(s):
-    """'12억 3,000' 형태 등을 대략 만원 단위 정수로 변환"""
     if s is None:
         return None
     t = str(s).strip()
@@ -206,22 +184,17 @@ def _parse_price_number(s):
     except Exception:
         return None
 
-
 def _resolve_price_change(raw):
-    """가격변동 표시"""
     v = raw.get("priceChangeState")
-
     if isinstance(v, str) and v:
         updown = v.strip().upper()
         if updown == "UP":
             return "상승"
         if updown == "DOWN":
             return "하락"
-
     changed = _truthy(v)
     if not changed:
         return ""
-
     for k in ("priceChangeType", "dealPriceChangeTypeCode", "rentPriceChangeTypeCode", "priceChangeDirection"):
         s = raw.get(k)
         if isinstance(s, str):
@@ -230,7 +203,6 @@ def _resolve_price_change(raw):
                 return "상승"
             if "DOWN" in su:
                 return "하락"
-
     for k in ("priceChange", "priceChangeAmount"):
         delta = raw.get(k)
         if delta is not None:
@@ -242,7 +214,6 @@ def _resolve_price_change(raw):
                     return "하락"
             except Exception:
                 pass
-
     prev_candidates = ("previousDealOrWarrantPrc", "prevPrice", "previousPrice")
     curr_candidates = ("dealOrWarrantPrc", "price", "currentPrice")
     prev_val = None
@@ -259,13 +230,10 @@ def _resolve_price_change(raw):
             break
     if prev_val is not None and curr_val is not None and prev_val != curr_val:
         return "상승" if curr_val > prev_val else "하락"
-
     return "변동"
-
 
 class AggressiveCardScroll:
     """네이버 부동산 매물 크롤러 (개선된 스크롤 방식)"""
-
     def __init__(self, complex_id, complex_name):
         self.complex_id = complex_id
         self.complex_name = complex_name
@@ -277,7 +245,6 @@ class AggressiveCardScroll:
         self.more_data = True
 
     async def setup_playwright(self):
-        """Playwright 환경 설정"""
         debug_log("=== Playwright 환경 설정 시작 ===", "STEP")
         try:
             self.playwright = await async_playwright().start()
@@ -307,13 +274,11 @@ class AggressiveCardScroll:
             )
             self.page = await self.context.new_page()
             self.page.on('response', self.handle_response)
-
         except Exception as e:
             debug_log(f"Playwright 설정 실패: {str(e)}", "ERROR")
             raise
 
     async def handle_response(self, response):
-        """API 응답 모니터링 및 원본 데이터 저장"""
         url = response.url
         if 'api/articles/complex' in url and 'page=' in url:
             try:
@@ -328,21 +293,17 @@ class AggressiveCardScroll:
                 debug_log(f"API 응답 파싱 실패: {url} - {str(e)}", "WARNING")
 
     async def extract_properties_from_response(self, data, url):
-        """API 응답에서 매물 데이터 추출"""
         if isinstance(data, dict) and 'articleList' in data:
             articles = data['articleList']
             page_match = re.search(r'page=(\d+)', url)
             page_num = page_match.group(1) if page_match else "Unknown"
-
             new_properties = 0
             for article in articles:
                 if isinstance(article, dict):
                     article_no = article.get('articleNo', '')
                     if article_no and article_no not in self.unique_article_nos:
                         self.unique_article_nos.add(article_no)
-
                         is_owner = article.get('verificationTypeCode') == 'OWNER'
-
                         property_data = {
                             'complex_id': self.complex_id,
                             'complex_name': self.complex_name,
@@ -355,26 +316,18 @@ class AggressiveCardScroll:
                         }
                         self.property_cards.append(property_data)
                         new_properties += 1
-
             if new_properties > 0:
                 debug_log(f"  ➕ 페이지 {page_num}에서 {new_properties}개 매물 추가 (총 {len(self.property_cards)}개)", "SUCCESS")
-
-            # isMoreData 상태 반영
             self.more_data = bool(data.get('isMoreData', False))
             debug_log(f"  📄 isMoreData: {self.more_data}", "DEBUG")
             return self.more_data
-
         return False
 
     async def navigate_to_complex_page(self):
-        """단지 페이지로 이동 및 매물 탭 활성화"""
         debug_log("=== 단지 페이지 이동 시작 ===", "STEP")
         try:
-            # 페이지 로드
             await self.page.goto(self.base_url, wait_until='domcontentloaded', timeout=60000)
             await asyncio.sleep(3)
-
-            # 상세매물검색 버튼 클릭
             debug_log("상세매물검색 버튼 클릭 시도...", "DEBUG")
             try:
                 clicked = await self.page.evaluate("""
@@ -388,17 +341,13 @@ class AggressiveCardScroll:
                         return false;
                     }
                 """)
-                
                 if clicked:
                     debug_log("✅ 상세매물검색 버튼 클릭 성공", "SUCCESS")
                     await asyncio.sleep(2)
                 else:
                     debug_log("⚠️ 상세매물검색 버튼을 찾지 못함 (이미 활성화 상태일 수 있음)", "WARNING")
-                    
             except Exception as e:
                 debug_log(f"버튼 클릭 중 오류: {str(e)}", "WARNING")
-
-            # 초기 API 응답 대기
             try:
                 await self.page.wait_for_response(
                     lambda r: 'api/articles/complex' in r.url, 
@@ -406,30 +355,23 @@ class AggressiveCardScroll:
                 )
             except:
                 pass
-
         except Exception as e:
             debug_log(f"페이지 로드 실패: {str(e)}", "ERROR")
             raise
 
     async def aggressive_scroll(self):
-        """개선된 스크롤: 컨테이너 높이 변화 감지 방식"""
         debug_log("=== 스크롤 컨테이너 방식 스크롤 시작 ===", "STEP")
-        
         last_height = 0
         no_height_change_count = 0
-        MAX_NO_CHANGE = 3  # 높이가 3번 연속 안 바뀌면 종료
+        MAX_NO_CHANGE = 3
         scroll_attempts = 0
-        
         while self.more_data:
             prev_count = len(self.property_cards)
-            
             try:
-                # 현재 컨테이너 상태 확인
                 container_state = await self.page.evaluate("""
                     () => {
                         const container = document.querySelector('.item_list--article');
                         if (!container) return { success: false };
-                        
                         return {
                             success: true,
                             scrollHeight: container.scrollHeight,
@@ -438,19 +380,14 @@ class AggressiveCardScroll:
                         };
                     }
                 """)
-                
                 if not container_state['success']:
                     debug_log("⚠️ 스크롤 컨테이너를 찾지 못함", "WARNING")
                     break
-                
                 current_height = container_state['scrollHeight']
                 is_at_bottom = (container_state['scrollTop'] + container_state['clientHeight']) >= (current_height - 10)
-                
-                # 높이 변화 확인
                 if current_height == last_height and is_at_bottom:
                     no_height_change_count += 1
                     debug_log(f"⚠️ 컨테이너 높이 변화 없음 ({no_height_change_count}/{MAX_NO_CHANGE})", "WARNING")
-                    
                     if no_height_change_count >= MAX_NO_CHANGE:
                         if not self.more_data:
                             debug_log("⏹️ isMoreData=False + 높이 변화 없음 → 종료", "INFO")
@@ -458,14 +395,12 @@ class AggressiveCardScroll:
                         else:
                             debug_log("⚠️ 높이 변화 없지만 isMoreData=True → 10초 추가 대기", "WARNING")
                             await asyncio.sleep(10)
-                            no_height_change_count = 0  # 리셋하고 재시도
+                            no_height_change_count = 0
                 else:
                     no_height_change_count = 0
                     if current_height > last_height:
                         debug_log(f"📈 컨테이너 확장: {last_height} → {current_height} (+{current_height - last_height}px)", "SUCCESS")
                     last_height = current_height
-                
-                # 스크롤 실행
                 scroll_result = await self.page.evaluate("""
                     () => {
                         const container = document.querySelector('.item_list--article');
@@ -473,7 +408,6 @@ class AggressiveCardScroll:
                             const before = container.scrollTop;
                             container.scrollTop += 1000;
                             const after = container.scrollTop;
-                            
                             return {
                                 success: true,
                                 scrolled: after - before,
@@ -483,12 +417,9 @@ class AggressiveCardScroll:
                         return { success: false };
                     }
                 """)
-                
                 if scroll_result['success']:
                     scroll_attempts += 1
                     debug_log(f"🔄 [{scroll_attempts}] 스크롤: {scroll_result['scrolled']}px (진행률: {scroll_result['progress']}%)", "DEBUG")
-                
-                # API 응답 적극 대기
                 try:
                     await self.page.wait_for_response(
                         lambda r: 'api/articles/complex' in r.url and 'page=' in r.url,
@@ -497,27 +428,19 @@ class AggressiveCardScroll:
                     debug_log("📡 API 응답 감지!", "SUCCESS")
                 except:
                     pass
-                
                 await asyncio.sleep(1.5)
-                
-                # 새 매물 확인
                 if len(self.property_cards) > prev_count:
                     new_count = len(self.property_cards) - prev_count
                     debug_log(f"🎉 새 매물 {new_count}개 추가! (총 {len(self.property_cards)}개)", "SUCCESS")
-                
-                # 안전 장치 (최대 100회 스크롤 시도)
                 if scroll_attempts >= 100:
                     debug_log(f"⛔ 안전중단: 100회 스크롤 시도 초과 (총 {len(self.property_cards)}개 수집)", "WARNING")
                     break
-                    
             except Exception as e:
                 debug_log(f"스크롤 중 오류: {str(e)}", "WARNING")
                 await asyncio.sleep(2)
-        
         debug_log(f"✅ 스크롤 완료 (총 {len(self.property_cards)}개 수집, {scroll_attempts}회 시도)", "SUCCESS")
 
     async def close_browser(self):
-        """브라우저 종료"""
         try:
             if hasattr(self, 'browser'):
                 await self.browser.close()
@@ -527,20 +450,17 @@ class AggressiveCardScroll:
             pass
 
     async def run(self):
-        """크롤러 실행"""
         try:
             await self.setup_playwright()
             await self.navigate_to_complex_page()
             await self.aggressive_scroll()
             await self.close_browser()
-
             return {
                 'complex_id': self.complex_id,
                 'complex_name': self.complex_name,
                 'property_count': len(self.property_cards),
                 'properties': self.property_cards
             }
-
         except Exception as e:
             debug_log(f"크롤링 중 치명적 오류 발생: {str(e)}", "ERROR")
             await self.close_browser()
@@ -552,12 +472,8 @@ class AggressiveCardScroll:
                 'error': str(e)
             }
 
-
 def format_property_data(property_data):
-    """매물 데이터 포맷팅 (기존 방식 유지)"""
     raw_data = property_data.get('raw_data', {})
-
-    # 면적
     area1 = raw_data.get('area1', '')
     area2 = raw_data.get('area2', '')
     if area1 and area2 and area1 != area2:
@@ -566,8 +482,6 @@ def format_property_data(property_data):
         area = f"{area1}m²"
     else:
         area = raw_data.get('areaName', '') + "m²" or "Unknown"
-
-    # 가격
     trade_type = raw_data.get('tradeTypeName', '')
     price = raw_data.get('dealOrWarrantPrc', '')
     if trade_type == '월세':
@@ -579,25 +493,18 @@ def format_property_data(property_data):
             price = deposit
         elif monthly:
             price = f"{monthly}만원"
-
-    # 보완 필드
     price_change_display = _resolve_price_change(raw_data)
     is_owner_listing = "집주인" if property_data.get('is_owner_flag') is True else ""
     certification_ad = "인증광고" if _truthy(raw_data.get('tradeCheckedByOwner')) else ""
     direct_trade_listing = "직거래" if _truthy(raw_data.get('isDirectTrade')) else ""
     photo_status = "사진있음" if _has_photos(raw_data) else ""
-
-    # 등록일
     date_str = raw_data.get('articleConfirmYmd', '')
     if date_str and len(str(date_str)) == 8 and str(date_str).isdigit():
         registration_date = f"{str(date_str)[:4]}.{str(date_str)[4:6]}.{str(date_str)[6:8]}"
     else:
         registration_date = date_str or "Unknown"
-
-    # 중개업소ID
     realtor_id_raw = _extract_realtor_id(raw_data)
     realtor_id_cell = _to_text_cell(realtor_id_raw)
-
     return [
         property_data.get('complex_name', ''),
         trade_type,
@@ -622,25 +529,486 @@ def format_property_data(property_data):
         certification_ad
     ]
 
+# ====================================================================
+# 데이터 정리 관련 코드 (부동산데이터처리_테스트.py에서 가져옴)
+# ====================================================================
 
+# 상수
+COL_단지명 = 0
+COL_거래구분 = 1
+COL_동 = 2
+COL_층수 = 3
+COL_면적 = 4
+COL_가격 = 5
+COL_가격변동 = 6
+COL_중복업소수 = 7
+COL_중개업소 = 8
+COL_중개업소ID = 9
+COL_등록일자 = 10
+COL_방향 = 11
+COL_특기사항 = 12
+COL_제공 = 13
+COL_집주인 = 14
+COL_직거래 = 15
+COL_사진유무 = 16
+COL_경도 = 17
+COL_위도 = 18
+COL_매물번호 = 19
+COL_인증광고 = 20
+
+# 스타일 색상 (RGB)
+COLOR_전세 = {"red": 0.996, "green": 0.910, "blue": 0.851}
+COLOR_월세 = {"red": 0.882, "green": 0.914, "blue": 0.788}
+COLOR_압구정원 = {"red": 0.812, "green": 0.886, "blue": 0.953}
+COLOR_집주인_TEXT = {"red": 0.416, "green": 0.659, "blue": 0.310}
+COLOR_저빈도_TEXT = {"red": 0.800, "green": 0.000, "blue": 0.000}
+
+EXCLUDED_COMPLEXES = ["메이플자이", "트리마제"]
+ALIAS_SHEET_NAME = "압구정 중개업소"
+ALIAS_HEADER_NAME = "중개업소명"
+ALIAS_HEADER_ID = "중개업소ID"
+ALIAS_HEADER_CANON = "실제상호"
+LOW_FREQUENCY_THRESHOLD = 3
+
+def normalize(v):
+    if v is None:
+        return ""
+    return str(v).strip().replace("  ", " ").replace("  ", " ")
+
+def extract_dong_number(s):
+    if not isinstance(s, str):
+        return 0
+    cleaned = re.sub(r'[^\d-]', '', s)
+    try:
+        return float(cleaned.replace('-', '.'))
+    except:
+        return 0
+
+def extract_area_number(s):
+    if not s:
+        return 0
+    s = str(s).strip()
+    if not s:
+        return 0
+    numbers = re.findall(r'\d+\.?\d*', s)
+    if numbers:
+        try:
+            return float(numbers[0])
+        except:
+            return 0
+    return 0
+
+def load_brokerage_alias_maps(sheet_service, spreadsheet_id):
+    by_name = {}
+    by_id = {}
+    try:
+        sheet_metadata = sheet_service.spreadsheets().get(
+            spreadsheetId=spreadsheet_id
+        ).execute()
+        alias_sheet_id = None
+        for sheet in sheet_metadata.get('sheets', []):
+            if sheet['properties']['title'] == ALIAS_SHEET_NAME:
+                alias_sheet_id = sheet['properties']['sheetId']
+                break
+        if alias_sheet_id is None:
+            print(f"'{ALIAS_SHEET_NAME}' 시트를 찾을 수 없습니다.")
+            return {"byName": by_name, "byId": by_id}
+        result = sheet_service.spreadsheets().values().get(
+            spreadsheetId=spreadsheet_id,
+            range=f"'{ALIAS_SHEET_NAME}'!A:Z"
+        ).execute()
+        values = result.get('values', [])
+        if len(values) < 2:
+            return {"byName": by_name, "byId": by_id}
+        header = values[0]
+        idx_name = header.index(ALIAS_HEADER_NAME) if ALIAS_HEADER_NAME in header else -1
+        idx_id = header.index(ALIAS_HEADER_ID) if ALIAS_HEADER_ID in header else -1
+        idx_canon = header.index(ALIAS_HEADER_CANON) if ALIAS_HEADER_CANON in header else -1
+        if idx_canon < 0:
+            return {"byName": by_name, "byId": by_id}
+        for row in values[1:]:
+            if len(row) <= idx_canon:
+                continue
+            canon = normalize(row[idx_canon])
+            if not canon:
+                continue
+            if idx_name >= 0 and len(row) > idx_name:
+                name = normalize(row[idx_name])
+                if name:
+                    by_name[name] = canon
+            if idx_id >= 0 and len(row) > idx_id:
+                id_val = normalize(row[idx_id])
+                if id_val:
+                    by_id[id_val] = canon
+        print(f"[Alias] byName={len(by_name)}, byId={len(by_id)}")
+    except Exception as e:
+        print(f"매핑 로드 오류: {e}")
+    return {"byName": by_name, "byId": by_id}
+
+def sort_and_group_data(rows):
+    by_complex = {}
+    order = []
+    for r in rows:
+        complex_name = r[COL_단지명] if len(r) > COL_단지명 else ""
+        if complex_name not in by_complex:
+            by_complex[complex_name] = []
+            order.append(complex_name)
+        by_complex[complex_name].append({
+            "원본행": r,
+            "거래": r[COL_거래구분] if len(r) > COL_거래구분 else "",
+            "면적": extract_area_number(r[COL_면적] if len(r) > COL_면적 else ""),
+            "동": extract_dong_number(r[COL_동] if len(r) > COL_동 else "")
+        })
+    out = []
+    for c in order:
+        arr = by_complex[c]
+        arr.sort(key=lambda x: (
+            1 if x["거래"] == "매매" else (2 if x["거래"] == "전세" else (3 if x["거래"] == "월세" else 99)),
+            x["면적"],
+            x["동"]
+        ))
+        for x in arr:
+            out.append(x["원본행"])
+    return out
+
+def process_duplicate_listings(rows, alias):
+    item_map = {}
+    infos = []
+    for r in rows:
+        key_parts = [
+            r[COL_단지명] if len(r) > COL_단지명 else "",
+            r[COL_거래구분] if len(r) > COL_거래구분 else "",
+            r[COL_동] if len(r) > COL_동 else "",
+            r[COL_층수] if len(r) > COL_층수 else "",
+            r[COL_가격] if len(r) > COL_가격 else ""
+        ]
+        key = "|".join(str(p) for p in key_parts)
+        raw_name = normalize(r[COL_중개업소] if len(r) > COL_중개업소 else "")
+        raw_id = normalize(r[COL_중개업소ID] if len(r) > COL_중개업소ID else "")
+        display_name = alias["byName"].get(raw_name)
+        if not display_name and raw_id:
+            display_name = alias["byId"].get(raw_id)
+        if not display_name:
+            display_name = raw_name
+        owner = normalize(r[COL_집주인] if len(r) > COL_집주인 else "") == "집주인"
+        if key not in item_map:
+            item_map[key] = {
+                "대표행": r.copy() if isinstance(r, list) else list(r),
+                "상태": {}
+            }
+        if display_name:
+            prev = item_map[key]["상태"].get(display_name, False)
+            item_map[key]["상태"][display_name] = prev or owner
+    for key, info in item_map.items():
+        row = info["대표행"]
+        names = list(info["상태"].keys())
+        dup = len(names)
+        while len(row) <= COL_중개업소:
+            row.append("")
+        row[COL_가격변동] = ""
+        row[COL_중복업소수] = dup if dup > 1 else ""
+        row[COL_중개업소] = ", ".join(names)
+        has_apgujeong_one = any("압구정원" in n for n in names)
+        infos.append({
+            "행": row,
+            "중복여부": dup > 1,
+            "거래구분": row[COL_거래구분] if len(row) > COL_거래구분 else "",
+            "압구정원포함": has_apgujeong_one,
+            "상태": info["상태"]
+        })
+    return {
+        "finalDataRows": [x["행"] for x in infos],
+        "finalDataInfos": infos
+    }
+
+def get_brokerage_counts(final_rows):
+    cnt = {}
+    for r in final_rows:
+        complex_name = r[COL_단지명] if len(r) > COL_단지명 else ""
+        if complex_name in EXCLUDED_COMPLEXES:
+            continue
+        joined = str(r[COL_중개업소] if len(r) > COL_중개업소 else "")
+        names = [normalize(s) for s in joined.split(",") if normalize(s)]
+        for name in names:
+            cnt[name] = cnt.get(name, 0) + 1
+    return cnt
+
+def apply_styles_and_alignment(sheet_service, spreadsheet_id, sheet_id, infos, header_row, col_count, brokerage_counts):
+    try:
+        row_count = len(infos)
+        if not row_count:
+            return
+        print(f"스타일 적용 시작: {row_count}행")
+        requests = []
+        for idx, it in enumerate(infos):
+            row = it["행"]
+            complex_name = row[COL_단지명] if len(row) > COL_단지명 else ""
+            trade = row[COL_거래구분] if len(row) > COL_거래구분 else ""
+            bg_color = None
+            if it["압구정원포함"]:
+                bg_color = COLOR_압구정원
+            elif trade == "전세":
+                bg_color = COLOR_전세
+            elif trade == "월세":
+                bg_color = COLOR_월세
+            is_bold = it["압구정원포함"] or it["중복여부"]
+            for c in range(col_count):
+                row_num = header_row + 1 + idx
+                if bg_color:
+                    requests.append({
+                        "updateCells": {
+                            "range": {
+                                "sheetId": sheet_id,
+                                "startRowIndex": row_num - 1,
+                                "endRowIndex": row_num,
+                                "startColumnIndex": c,
+                                "endColumnIndex": c + 1
+                            },
+                            "rows": [{
+                                "values": [{
+                                    "userEnteredFormat": {
+                                        "backgroundColor": bg_color
+                                    }
+                                }]
+                            }],
+                            "fields": "userEnteredFormat.backgroundColor"
+                        }
+                    })
+                if is_bold:
+                    requests.append({
+                        "updateCells": {
+                            "range": {
+                                "sheetId": sheet_id,
+                                "startRowIndex": row_num - 1,
+                                "endRowIndex": row_num,
+                                "startColumnIndex": c,
+                                "endColumnIndex": c + 1
+                            },
+                            "rows": [{
+                                "values": [{
+                                    "userEnteredFormat": {
+                                        "textFormat": {
+                                            "bold": True
+                                        }
+                                    }
+                                }]
+                            }],
+                            "fields": "userEnteredFormat.textFormat.bold"
+                        }
+                    })
+            if len(row) > COL_중개업소:
+                joined = str(row[COL_중개업소] or "")
+                names = [normalize(s) for s in joined.split(",") if normalize(s)]
+                if names:
+                    rich_text_runs = []
+                    cursor = 0
+                    for name in names:
+                        start = cursor
+                        end = start + len(name)
+                        if end <= len(joined):
+                            was_owner = it["상태"].get(name, False)
+                            low = (complex_name not in EXCLUDED_COMPLEXES and 
+                                   brokerage_counts.get(name, 0) <= LOW_FREQUENCY_THRESHOLD)
+                            if was_owner:
+                                color = COLOR_집주인_TEXT
+                            elif low:
+                                color = COLOR_저빈도_TEXT
+                            else:
+                                color = None
+                            if color:
+                                rich_text_runs.append({
+                                    "startIndex": start,
+                                    "endIndex": end,
+                                    "format": {
+                                        "foregroundColor": color
+                                    }
+                                })
+                            cursor = end + 2
+                    if rich_text_runs:
+                        row_num = header_row + 1 + idx
+                        requests.append({
+                            "updateCells": {
+                                "range": {
+                                    "sheetId": sheet_id,
+                                    "startRowIndex": row_num - 1,
+                                    "endRowIndex": row_num,
+                                    "startColumnIndex": COL_중개업소,
+                                    "endColumnIndex": COL_중개업소 + 1
+                                },
+                                "rows": [{
+                                    "values": [{
+                                        "userEnteredValue": {
+                                            "stringValue": joined
+                                        },
+                                        "userEnteredFormat": {
+                                            "textFormat": {
+                                                "foregroundColor": {"red": 0, "green": 0, "blue": 0}
+                                            }
+                                        }
+                                    }]
+                                }],
+                                "fields": "userEnteredValue.stringValue,userEnteredFormat.textFormat.foregroundColor"
+                            }
+                        })
+        align_cols = min(col_count, 8)
+        if align_cols > 0:
+            requests.append({
+                "repeatCell": {
+                    "range": {
+                        "sheetId": sheet_id,
+                        "startRowIndex": header_row,
+                        "endRowIndex": header_row + row_count,
+                        "startColumnIndex": 0,
+                        "endColumnIndex": align_cols
+                    },
+                    "cell": {
+                        "userEnteredFormat": {
+                            "horizontalAlignment": "CENTER"
+                        }
+                    },
+                    "fields": "userEnteredFormat.horizontalAlignment"
+                }
+            })
+        if requests:
+            print(f"스타일 요청 {len(requests)}개 실행 중...")
+            body = {"requests": requests}
+            sheet_service.spreadsheets().batchUpdate(
+                spreadsheetId=spreadsheet_id,
+                body=body
+            ).execute()
+            print("스타일 적용 완료")
+    except Exception as e:
+        print(f"스타일 적용 오류: {e}")
+        import traceback
+        traceback.print_exc()
+
+def process_real_estate_data(spreadsheet, worksheet, sheet_service, spreadsheet_id):
+    """데이터 정리 함수"""
+    try:
+        print("=== 부동산데이터처리 시작 ===")
+        sheet_metadata = sheet_service.spreadsheets().get(
+            spreadsheetId=spreadsheet_id
+        ).execute()
+        main_sheet = None
+        main_sheet_id = None
+        for sheet in sheet_metadata.get('sheets', []):
+            props = sheet['properties']
+            if props.get('sheetId') == 103445093:
+                main_sheet = props['title']
+                main_sheet_id = props['sheetId']
+                break
+        if not main_sheet:
+            main_sheet = sheet_metadata['sheets'][0]['properties']['title']
+            main_sheet_id = sheet_metadata['sheets'][0]['properties']['sheetId']
+        print(f"시트명: {main_sheet}, Sheet ID: {main_sheet_id}")
+        header_row = 1
+        result = sheet_service.spreadsheets().values().get(
+            spreadsheetId=spreadsheet_id,
+            range=f"'{main_sheet}'!A:Z"
+        ).execute()
+        values = result.get('values', [])
+        if len(values) <= header_row:
+            print("처리할 데이터가 없습니다.")
+            return
+        last_row = len(values)
+        print(f"마지막 행: {last_row}")
+        header_col_count = 21
+        alias = load_brokerage_alias_maps(sheet_service, spreadsheet_id)
+        raw_data = values[header_row:]
+        print(f"읽은 데이터 행수: {len(raw_data)}")
+        sorted_data = sort_and_group_data(raw_data)
+        print(f"정렬된 데이터 행수: {len(sorted_data)}")
+        result_data = process_duplicate_listings(sorted_data, alias)
+        final_data_rows = result_data["finalDataRows"]
+        final_data_infos = result_data["finalDataInfos"]
+        print(f"통합된 데이터 행수: {len(final_data_rows)}")
+        brokerage_counts = get_brokerage_counts(final_data_rows)
+        print(f"중개업소 종류 수: {len(brokerage_counts)}")
+        col_count = len(final_data_rows[0]) if final_data_rows else header_col_count
+        print("기존 데이터 및 서식 지우기 중...")
+        estimated_max_rows = max(last_row, len(final_data_rows) + 500) if final_data_rows else last_row
+        clear_requests = [{
+            "repeatCell": {
+                "range": {
+                    "sheetId": main_sheet_id,
+                    "startRowIndex": header_row,
+                    "endRowIndex": estimated_max_rows,
+                    "startColumnIndex": 0,
+                    "endColumnIndex": col_count
+                },
+                "cell": {
+                    "userEnteredFormat": {}
+                },
+                "fields": "userEnteredFormat"
+            }
+        }]
+        body = {"requests": clear_requests}
+        sheet_service.spreadsheets().batchUpdate(
+            spreadsheetId=spreadsheet_id,
+            body=body
+        ).execute()
+        clear_range = f"'{main_sheet}'!{header_row + 1}:{estimated_max_rows}"
+        sheet_service.spreadsheets().values().clear(
+            spreadsheetId=spreadsheet_id,
+            range=clear_range
+        ).execute()
+        print("기존 데이터 및 서식 지우기 완료")
+        if final_data_rows:
+            for row in final_data_rows:
+                while len(row) < col_count:
+                    row.append("")
+            write_range = f"'{main_sheet}'!{header_row + 1}:{header_row + len(final_data_rows)}"
+            body = {'values': final_data_rows}
+            sheet_service.spreadsheets().values().update(
+                spreadsheetId=spreadsheet_id,
+                range=write_range,
+                valueInputOption='USER_ENTERED',
+                body=body
+            ).execute()
+            print("데이터 쓰기 완료")
+        apply_styles_and_alignment(
+            sheet_service, spreadsheet_id, main_sheet_id,
+            final_data_infos, header_row, col_count, brokerage_counts
+        )
+        print("=== 부동산데이터처리 완료 ===")
+        print(f"총 매물: {len(final_data_rows)}개")
+    except Exception as e:
+        print(f"오류 발생: {e}")
+        import traceback
+        traceback.print_exc()
+        raise
+
+# ====================================================================
+# 메인 실행 함수
+# ====================================================================
 async def main():
-    """메인 실행 함수"""
+    """메인 실행 함수 - 크롤링 + 데이터 정리"""
     print("\n" + "="*70)
-    print("🚀 네이버 부동산 크롤러 시작 (개선된 스크롤 방식)")
+    print("🚀 네이버 부동산 크롤러 + 데이터 정리 통합 실행")
     print(f"⏰ 시작시간: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("="*70 + "\n")
-
+    
     # 1) 구글 시트 연결
     debug_log("=== 1단계: 구글 시트 연결 및 초기화 ===", "STEP")
-    worksheet = setup_google_sheets()
+    worksheet, spreadsheet = setup_google_sheets()
     if not worksheet:
         debug_log("구글 시트 연결 실패. 프로그램 종료", "ERROR")
         return
-
+    
+    # Google Sheets API 서비스 생성 (데이터 정리용)
+    credentials_file = 'service_account.json'
+    credentials = service_account.Credentials.from_service_account_file(
+        credentials_file,
+        scopes=['https://www.googleapis.com/auth/spreadsheets']
+    )
+    from googleapiclient.discovery import build
+    sheet_service = build('sheets', 'v4', credentials=credentials)
+    spreadsheet_id = os.environ.get('SPREADSHEET_ID', '1QP56lm5kPBdsUhrgcgY2U-JdmukXIkKCSxefd1QExKE')
+    
     debug_log("기존 데이터 삭제 중...", "DEBUG")
     worksheet.clear()
     debug_log("기존 데이터 삭제 완료", "SUCCESS")
-
+    
     headers = [
         "단지명", "거래구분", "동", "층수", "면적", "가격",
         "가격변동", "중복업소",
@@ -653,24 +1021,21 @@ async def main():
     debug_log(f"헤더 추가 중 (총 {len(headers)}개 열)", "DEBUG")
     worksheet.append_row(headers)
     debug_log("헤더 추가 완료", "SUCCESS")
-
+    
     # 2) 크롤링
     debug_log("=== 2단계: 크롤링 실행 ===", "STEP")
     results = []
     total_start_time = time.time()
-
+    
     for idx, complex_info in enumerate(COMPLEXES, 1):
         debug_log(f"\n{'#'*70}", "STEP")
         debug_log(f"📍 [{idx}/{len(COMPLEXES)}] {complex_info['name']} ({complex_info['id']})", "STEP")
         debug_log(f"{'#'*70}", "STEP")
-
         complex_start_time = time.time()
-
         crawler = AggressiveCardScroll(complex_info['id'], complex_info['name'])
         result = await crawler.run()
-
         complex_duration = time.time() - complex_start_time
-
+        
         if 'error' in result:
             results.append({
                 'complex_name': complex_info['name'],
@@ -682,32 +1047,37 @@ async def main():
         else:
             property_count = result['property_count']
             rows_to_append = []
-
             if result.get('properties'):
                 for prop in result['properties']:
                     formatted_row = format_property_data(prop)
                     if len(formatted_row) == len(headers):
                         rows_to_append.append(formatted_row)
-
             if rows_to_append:
                 worksheet.append_rows(rows_to_append)
                 debug_log(f"✅ {complex_info['name']} 매물 {len(rows_to_append)}개 시트 기록 완료", "SUCCESS")
-
             results.append({
                 'complex_name': complex_info['name'],
                 'property_count': property_count,
                 'duration_seconds': complex_duration,
                 'status': 'success'
             })
-
         if idx < len(COMPLEXES):
             await asyncio.sleep(0.5)
-
-    # 3) 결과 요약
+    
+    # 3) 데이터 정리
+    debug_log("\n=== 3단계: 데이터 정리 실행 ===", "STEP")
+    try:
+        process_real_estate_data(spreadsheet, worksheet, sheet_service, spreadsheet_id)
+        debug_log("✅ 데이터 정리 완료", "SUCCESS")
+    except Exception as e:
+        debug_log(f"❌ 데이터 정리 실패: {str(e)}", "ERROR")
+        debug_log(f"상세 에러:\n{traceback.format_exc()}", "DEBUG")
+    
+    # 4) 결과 요약
     total_end_time = time.time()
     total_duration = total_end_time - total_start_time
     total_properties = sum(r['property_count'] for r in results)
-
+    
     print("\n" + "="*70)
     print("📊 전체 결과 요약")
     print("="*70)
@@ -715,7 +1085,7 @@ async def main():
     print(f"⏱️ 전체 소요시간: {total_duration:.1f}초 ({total_duration/60:.1f}분)")
     print(f"🏠 총 매물 수: {total_properties}개")
     print("="*70)
-
+    
     result_data = {
         'total_duration_seconds': total_duration,
         'start_time': datetime.fromtimestamp(total_start_time).strftime('%Y-%m-%d %H:%M:%S'),
@@ -725,11 +1095,11 @@ async def main():
     
     with open('crawling_results.json', 'w', encoding='utf-8') as f:
         json.dump(result_data, f, ensure_ascii=False, indent=2)
-
+    
     print("\n" + "="*70)
-    print("🎉 크롤링 완료!")
+    print("🎉 크롤링 및 데이터 정리 완료!")
     print("="*70 + "\n")
-
 
 if __name__ == "__main__":
     asyncio.run(main())
+
