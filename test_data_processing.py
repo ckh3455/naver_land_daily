@@ -105,6 +105,7 @@ def load_brokerage_alias_maps(sheet_service, spreadsheet_id):
     """압구정 중개업소 시트에서 매핑 로드"""
     by_name = {}
     by_id = {}
+    valid_canon_names = set()  # 실제상호 열의 모든 값들 (빨간색 체크용)
     try:
         sheet_metadata = sheet_service.spreadsheets().get(
             spreadsheetId=spreadsheet_id
@@ -116,26 +117,29 @@ def load_brokerage_alias_maps(sheet_service, spreadsheet_id):
                 break
         if alias_sheet_id is None:
             print(f"'{ALIAS_SHEET_NAME}' 시트를 찾을 수 없습니다.")
-            return {"byName": by_name, "byId": by_id}
+            return {"byName": by_name, "byId": by_id, "validCanonNames": valid_canon_names}
         result = sheet_service.spreadsheets().values().get(
             spreadsheetId=spreadsheet_id,
             range=f"'{ALIAS_SHEET_NAME}'!A:Z"
         ).execute()
         values = result.get('values', [])
         if len(values) < 2:
-            return {"byName": by_name, "byId": by_id}
+            return {"byName": by_name, "byId": by_id, "validCanonNames": valid_canon_names}
         header = values[0]
         idx_name = header.index(ALIAS_HEADER_NAME) if ALIAS_HEADER_NAME in header else -1
         idx_id = header.index(ALIAS_HEADER_ID) if ALIAS_HEADER_ID in header else -1
         idx_canon = header.index(ALIAS_HEADER_CANON) if ALIAS_HEADER_CANON in header else -1
         if idx_canon < 0:
-            return {"byName": by_name, "byId": by_id}
+            return {"byName": by_name, "byId": by_id, "validCanonNames": valid_canon_names}
         for row in values[1:]:
             if len(row) <= idx_canon:
                 continue
             canon = normalize(row[idx_canon])
             if not canon:
                 continue
+            # 실제상호 열의 모든 값 저장 (빨간색 체크용)
+            valid_canon_names.add(canon)
+            
             if idx_name >= 0 and len(row) > idx_name:
                 name = normalize(row[idx_name])
                 if name:
@@ -144,10 +148,10 @@ def load_brokerage_alias_maps(sheet_service, spreadsheet_id):
                 id_val = normalize(row[idx_id])
                 if id_val:
                     by_id[id_val] = canon
-        print(f"[Alias] byName={len(by_name)}, byId={len(by_id)}")
+        print(f"[Alias] byName={len(by_name)}, byId={len(by_id)}, validCanonNames={len(valid_canon_names)}")
     except Exception as e:
         print(f"매핑 로드 오류: {e}")
-    return {"byName": by_name, "byId": by_id}
+    return {"byName": by_name, "byId": by_id, "validCanonNames": valid_canon_names}
 
 def sort_and_group_data(rows):
     """단지별 정렬 (매매→전세→월세 → 면적 → 동)"""
@@ -334,8 +338,9 @@ def apply_styles_and_alignment(sheet_service, spreadsheet_id, sheet_id, infos, h
                             if complex_name not in EXCLUDED_COMPLEXES:
                                 # 원본 중개업소명 가져오기 (변환 전 값)
                                 원본명 = it.get("원본명", {}).get(name, name)
-                                # 압구정 중개업소 시트의 "중개업소명" 열에 없는 업소명 확인
-                                not_in_alias = 원본명 not in alias.get("byName", {})
+                                # 압구정 중개업소 시트의 "실제상호" 열에 있는지 확인
+                                # 표시명(name)이 실제상호 열에 있으면 정상, 없으면 빨간색
+                                not_in_canon = name not in alias.get("validCanonNames", set())
                                 # 저빈도 업소 확인
                                 low = brokerage_counts.get(name, 0) <= LOW_FREQUENCY_THRESHOLD
                                 
@@ -343,22 +348,20 @@ def apply_styles_and_alignment(sheet_service, spreadsheet_id, sheet_id, infos, h
                                 if idx < 5 and name_idx == 0:
                                     print(f"\n[디버깅] 행 {idx+1}: 단지={complex_name}")
                                     print(f"  표시명='{name}', 원본명='{원본명}'")
-                                    print(f"  was_owner={was_owner}, not_in_alias={not_in_alias}, low={low}")
-                                    print(f"  alias['byName'] 키 개수: {len(alias.get('byName', {}))}")
-                                    print(f"  원본명이 alias에 있는지: {원본명 in alias.get('byName', {})}")
-                                    if 원본명 in alias.get('byName', {}):
-                                        print(f"  매핑된 실제상호: '{alias.get('byName', {}).get(원본명)}'")
+                                    print(f"  was_owner={was_owner}, not_in_canon={not_in_canon}, low={low}")
+                                    print(f"  validCanonNames 개수: {len(alias.get('validCanonNames', set()))}")
+                                    print(f"  표시명이 실제상호 열에 있는지: {name in alias.get('validCanonNames', set())}")
                                     print(f"  저빈도 체크: {name} = {brokerage_counts.get(name, 0)}개 (임계값: {LOW_FREQUENCY_THRESHOLD})")
                                 
                                 if was_owner:
                                     color = COLOR_집주인_TEXT
                                     if idx < 5 and name_idx == 0:
                                         print(f"  → 초록색 적용 (집주인)")
-                                elif not_in_alias:
-                                    # 압구정 중개업소 시트에 없는 업소명 → 빨간색
+                                elif not_in_canon:
+                                    # 압구정 중개업소 시트의 "실제상호" 열에 없는 업소명 → 빨간색
                                     color = COLOR_저빈도_TEXT
                                     if idx < 5 and name_idx == 0:
-                                        print(f"  ✅ 빨간색 적용: '{name}' (원본명 '{원본명}'이 alias에 없음)")
+                                        print(f"  ✅ 빨간색 적용: '{name}' (실제상호 열에 없음)")
                                 elif low:
                                     color = COLOR_저빈도_TEXT
                                     if idx < 5 and name_idx == 0:
@@ -374,7 +377,6 @@ def apply_styles_and_alignment(sheet_service, spreadsheet_id, sheet_id, infos, h
                             if color:
                                 rich_text_runs.append({
                                     "startIndex": name_start,
-                                    "endIndex": name_end,
                                     "format": {
                                         "foregroundColor": color
                                     }
@@ -396,6 +398,18 @@ def apply_styles_and_alignment(sheet_service, spreadsheet_id, sheet_id, infos, h
                                 print(f"    [{rt['startIndex']}:{rt['endIndex']}] = '{joined[rt['startIndex']:rt['endIndex']]}'")
                         
                         # RichText 형식으로 적용
+                        # 각 run에 endIndex 추가 (다음 run의 startIndex 또는 문자열 끝)
+                        formatted_runs = []
+                        for i, run in enumerate(rich_text_runs):
+                            if i < len(rich_text_runs) - 1:
+                                end_idx = rich_text_runs[i + 1]["startIndex"]
+                            else:
+                                end_idx = len(joined)
+                            formatted_runs.append({
+                                "startIndex": run["startIndex"],
+                                "format": run["format"]
+                            })
+                        
                         requests.append({
                             "updateCells": {
                                 "range": {
@@ -413,12 +427,12 @@ def apply_styles_and_alignment(sheet_service, spreadsheet_id, sheet_id, infos, h
                                         "userEnteredFormat": {
                                             "textFormat": {
                                                 "foregroundColor": {"red": 0, "green": 0, "blue": 0}
-                                            }
-                                        },
-                                        "textFormatRuns": rich_text_runs
+                                            },
+                                            "textFormatRuns": formatted_runs
+                                        }
                                     }]
                                 }],
-                                "fields": "userEnteredValue.stringValue,userEnteredFormat.textFormat.foregroundColor,userEnteredFormat.textFormatRuns"
+                                "fields": "userEnteredValue.stringValue,userEnteredFormat.textFormat,userEnteredFormat.textFormatRuns"
                             }
                         })
         align_cols = min(col_count, 8)
@@ -573,12 +587,13 @@ def process_real_estate_data():
                 for name in names:
                     was_owner = it["상태"].get(name, False)
                     원본명 = it.get("원본명", {}).get(name, name)
-                    not_in_alias = 원본명 not in alias.get("byName", {})
+                    # 실제상호 열에 있는지 확인
+                    not_in_canon = name not in alias.get("validCanonNames", set())
                     low = brokerage_counts.get(name, 0) <= LOW_FREQUENCY_THRESHOLD
                     
                     # 빨간색 조건 확인
-                    if not was_owner and (not_in_alias or low):
-                        reason = "압구정 중개업소 시트에 없음" if not_in_alias else f"저빈도 ({brokerage_counts.get(name, 0)}개)"
+                    if not was_owner and (not_in_canon or low):
+                        reason = "압구정 중개업소 시트의 실제상호 열에 없음" if not_in_canon else f"저빈도 ({brokerage_counts.get(name, 0)}개)"
                         red_list.append({
                             "단지": complex_name,
                             "표시명": name,
