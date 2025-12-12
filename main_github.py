@@ -620,10 +620,9 @@ def extract_area_number(s):
 
 # ✅ (통합) 테스트버전 성공과 동일: validCanonNames 포함
 def load_brokerage_alias_maps(sheet_service, spreadsheet_id):
-    """압구정 중개업소 시트에서 매핑 로드 (byName, byId, validCanonNames)"""
     by_name = {}
     by_id = {}
-    valid_canon_names = set()
+    valid_canon_names = set()  # '실제상호' 전체 값(빨간색 판정용)
 
     try:
         sheet_metadata = sheet_service.spreadsheets().get(
@@ -644,6 +643,7 @@ def load_brokerage_alias_maps(sheet_service, spreadsheet_id):
             spreadsheetId=spreadsheet_id,
             range=f"'{ALIAS_SHEET_NAME}'!A:Z"
         ).execute()
+
         values = result.get('values', [])
         if len(values) < 2:
             return {"byName": by_name, "byId": by_id, "validCanonNames": valid_canon_names}
@@ -652,12 +652,14 @@ def load_brokerage_alias_maps(sheet_service, spreadsheet_id):
         idx_name = header.index(ALIAS_HEADER_NAME) if ALIAS_HEADER_NAME in header else -1
         idx_id = header.index(ALIAS_HEADER_ID) if ALIAS_HEADER_ID in header else -1
         idx_canon = header.index(ALIAS_HEADER_CANON) if ALIAS_HEADER_CANON in header else -1
+
         if idx_canon < 0:
             return {"byName": by_name, "byId": by_id, "validCanonNames": valid_canon_names}
 
         for row in values[1:]:
             if len(row) <= idx_canon:
                 continue
+
             canon = normalize(row[idx_canon])
             if not canon:
                 continue
@@ -668,6 +670,7 @@ def load_brokerage_alias_maps(sheet_service, spreadsheet_id):
                 name = normalize(row[idx_name])
                 if name:
                     by_name[name] = canon
+
             if idx_id >= 0 and len(row) > idx_id:
                 id_val = normalize(row[idx_id])
                 if id_val:
@@ -678,6 +681,7 @@ def load_brokerage_alias_maps(sheet_service, spreadsheet_id):
         print(f"매핑 로드 오류: {e}")
 
     return {"byName": by_name, "byId": by_id, "validCanonNames": valid_canon_names}
+
 
 def sort_and_group_data(rows):
     by_complex = {}
@@ -706,8 +710,15 @@ def sort_and_group_data(rows):
     return out
 
 def process_duplicate_listings(rows, alias):
+    """
+    중복 매물 통합
+    - key 동일한 행들을 한 줄로 합치고, 중개업소를 콤마로 합침
+    - 중복업소(열)는 '최종 중개업소 개수'를 모든 행에 숫자로 표시 (최소 1)
+    - 중복여부(볼드 조건)는 중개업소 개수 >= 2 로만 결정
+    """
     item_map = {}
     infos = []
+
     for r in rows:
         key_parts = [
             r[COL_단지명] if len(r) > COL_단지명 else "",
@@ -721,9 +732,9 @@ def process_duplicate_listings(rows, alias):
         raw_name = normalize(r[COL_중개업소] if len(r) > COL_중개업소 else "")
         raw_id = normalize(r[COL_중개업소ID] if len(r) > COL_중개업소ID else "")
 
-        display_name = alias["byName"].get(raw_name)
+        display_name = alias.get("byName", {}).get(raw_name)
         if not display_name and raw_id:
-            display_name = alias["byId"].get(raw_id)
+            display_name = alias.get("byId", {}).get(raw_id)
         if not display_name:
             display_name = raw_name
 
@@ -739,21 +750,32 @@ def process_duplicate_listings(rows, alias):
         if display_name:
             prev = item_map[key]["상태"].get(display_name, False)
             item_map[key]["상태"][display_name] = prev or owner
+            # 원본 중개업소명 저장(빨간색 체크용)
             item_map[key]["원본명"][display_name] = raw_name
 
     for key, info in item_map.items():
         row = info["대표행"]
-        names = list(info["상태"].keys())
-        dup = len(names)
+        names = [n for n in info["상태"].keys() if normalize(n)]
+        # 최종 중개업소 수(표시/볼드 기준)
+        dup_count = max(1, len(names))
+
+        # 길이 보정
         while len(row) <= COL_중개업소:
             row.append("")
+        while len(row) <= COL_중복업소수:
+            row.append("")
+
         row[COL_가격변동] = ""
-        row[COL_중복업소수] = dup if dup > 1 else ""
+        # ✅ 모든 행에 숫자 표시(1 이상)
+        row[COL_중복업소수] = dup_count
         row[COL_중개업소] = ", ".join(names)
+
         has_apgujeong_one = any("압구정원" in n for n in names)
+
         infos.append({
             "행": row,
-            "중복여부": dup > 1,
+            # ✅ 볼드는 '중개업소 수 >= 2' 일 때만
+            "중복여부": dup_count >= 2,
             "거래구분": row[COL_거래구분] if len(row) > COL_거래구분 else "",
             "압구정원포함": has_apgujeong_one,
             "상태": info["상태"],
@@ -764,6 +786,7 @@ def process_duplicate_listings(rows, alias):
         "finalDataRows": [x["행"] for x in infos],
         "finalDataInfos": infos
     }
+
 
 def get_brokerage_counts(final_rows):
     cnt = {}
@@ -781,175 +804,161 @@ def get_brokerage_counts(final_rows):
 # ✅ (통합) 테스트버전 성공 로직: 안정형 RichText + 행단위 repeatCell + chunk batchUpdate
 # ==========================================================
 def apply_styles_and_alignment(sheet_service, spreadsheet_id, sheet_id, infos, header_row, col_count, brokerage_counts, alias):
-    row_count = len(infos)
-    if not row_count:
-        return
+    try:
+        row_count = len(infos)
+        if not row_count:
+            return
 
-    valid_canon = alias.get("validCanonNames", set())
+        print(f"스타일 적용 시작: {row_count}행")
+        requests = []
 
-    def build_text_runs(text, segments, debug_row=None):
-        """
-        segments: [{"start":int, "end":int, "color":{r,g,b}}, ...]
-        핵심 제약:
-          - TextFormatRun.startIndex는 반드시 len(text)보다 작아야 함. (==len 금지)
-          - 따라서 end==len(text) 위치에 '검정 복귀 run'을 추가하면 400 발생 → 금지
-        """
-        if not text:
-            return None
-        L = len(text)
+        DEFAULT_BLACK = {"red": 0, "green": 0, "blue": 0}
 
-        events = {0: DEFAULT_BLACK}
+        def _make_text_format_runs(text, segments):
+            """
+            segments: [{"start": int, "end": int, "color": {r,g,b}}, ...]
+            - textFormatRuns는 startIndex만 허용
+            - startIndex는 반드시 len(text)보다 작아야 함
+            - 따라서 end==len(text)인 경우에는 reset(black) run을 추가하면 안 됨
+            """
+            if not text:
+                return [{"startIndex": 0, "format": {"foregroundColor": DEFAULT_BLACK}}]
 
-        def set_event(pos, color):
-            if not isinstance(pos, int):
-                return
-            if pos < 0 or pos >= L:
-                return
-            # 같은 pos 충돌 시: 검정 < 색 우선
-            if pos not in events:
-                events[pos] = color
-            else:
-                if events[pos] == DEFAULT_BLACK and color != DEFAULT_BLACK:
-                    events[pos] = color
+            runs_map = {0: {"foregroundColor": DEFAULT_BLACK}}
 
-        for seg in segments:
-            s = seg.get("start")
-            e = seg.get("end")
-            c = seg.get("color")
-            if not (isinstance(s, int) and isinstance(e, int) and isinstance(c, dict)):
-                continue
-            if s < 0 or s >= L:
-                continue
-            if e <= s:
-                continue
-            if e > L:
-                continue
+            L = len(text)
 
-            set_event(s, c)
-            if e < L:
-                set_event(e, DEFAULT_BLACK)  # e==L이면 추가하지 않음(중요)
+            for seg in segments:
+                s = seg.get("start", -1)
+                e = seg.get("end", -1)
+                color = seg.get("color")
 
-        runs = []
-        prev = None
-        for pos in sorted(events.keys()):
-            col = events[pos]
-            if prev is None or col != prev:
-                runs.append({"startIndex": pos, "format": {"foregroundColor": col}})
-                prev = col
+                if not isinstance(s, int) or not isinstance(e, int):
+                    continue
+                if not isinstance(color, dict):
+                    continue
+                if s < 0 or e <= s:
+                    continue
+                if s >= L:
+                    continue
+                if e > L:
+                    e = L
 
-        # 방어: startIndex >= L 제거
-        bad = [r for r in runs if r.get("startIndex", -1) >= L]
-        if bad:
-            print(f"[디버그] ❗ 잘못된 textFormatRuns 제거: row={debug_row}, len={L}, bad={bad}")
-            runs = [r for r in runs if r.get("startIndex", -1) < L]
+                runs_map[s] = {"foregroundColor": color}
+                # ✅ e==L이면 startIndex=L이 되어 API 에러 → reset run 추가 금지
+                if e < L:
+                    runs_map[e] = {"foregroundColor": DEFAULT_BLACK}
 
-        if runs and runs[0]["startIndex"] != 0:
-            runs.insert(0, {"startIndex": 0, "format": {"foregroundColor": DEFAULT_BLACK}})
+            runs = [{"startIndex": idx, "format": fmt} for idx, fmt in sorted(runs_map.items(), key=lambda x: x[0])]
 
-        return runs if runs else None
+            # 동일 색 연속 run 압축
+            compact = []
+            prev = None
+            for r in runs:
+                cur = r.get("format", {}).get("foregroundColor")
+                if prev is None or cur != prev:
+                    compact.append(r)
+                    prev = cur
+            return compact
 
-    print(f"스타일 적용 시작: {row_count}행")
-    requests = []
-    req_bg_bold = 0
-    req_rich = 0
+        # ---------- 요청 생성 ----------
+        for idx, it in enumerate(infos):
+            row = it["행"]
+            complex_name = row[COL_단지명] if len(row) > COL_단지명 else ""
+            trade = row[COL_거래구분] if len(row) > COL_거래구분 else ""
 
-    for idx, it in enumerate(infos):
-        row = it["행"]
-        complex_name = row[COL_단지명] if len(row) > COL_단지명 else ""
-        trade = row[COL_거래구분] if len(row) > COL_거래구분 else ""
+            row_num = header_row + 1 + idx  # 1-based
+            start_row = row_num - 1
+            end_row = row_num
 
-        bg_color = None
-        if it.get("압구정원포함"):
-            bg_color = COLOR_압구정원
-        elif trade == "전세":
-            bg_color = COLOR_전세
-        elif trade == "월세":
-            bg_color = COLOR_월세
+            # 배경색(기존 유지)
+            bg_color = None
+            if it.get("압구정원포함"):
+                bg_color = COLOR_압구정원
+            elif trade == "전세":
+                bg_color = COLOR_전세
+            elif trade == "월세":
+                bg_color = COLOR_월세
 
-        is_bold = bool(it.get("압구정원포함")) or bool(it.get("중복여부"))
+            # ✅ 볼드 기준: 중복(중개업소 수 >=2)만
+            is_bold = bool(it.get("중복여부"))
 
-        row_num_1based = header_row + 1 + idx
-        start_row = row_num_1based - 1
-        end_row = row_num_1based
+            if bg_color:
+                requests.append({
+                    "repeatCell": {
+                        "range": {
+                            "sheetId": sheet_id,
+                            "startRowIndex": start_row,
+                            "endRowIndex": end_row,
+                            "startColumnIndex": 0,
+                            "endColumnIndex": col_count
+                        },
+                        "cell": {
+                            "userEnteredFormat": {
+                                "backgroundColor": bg_color
+                            }
+                        },
+                        "fields": "userEnteredFormat.backgroundColor"
+                    }
+                })
 
-        # (1) 배경/볼드: 행 단위 repeatCell (요청 최소화)
-        fmt = {}
-        fields = []
-        if bg_color:
-            fmt["backgroundColor"] = bg_color
-            fields.append("userEnteredFormat.backgroundColor")
-        if is_bold:
-            fmt.setdefault("textFormat", {})
-            fmt["textFormat"]["bold"] = True
-            fields.append("userEnteredFormat.textFormat.bold")
+            if is_bold:
+                requests.append({
+                    "repeatCell": {
+                        "range": {
+                            "sheetId": sheet_id,
+                            "startRowIndex": start_row,
+                            "endRowIndex": end_row,
+                            "startColumnIndex": 0,
+                            "endColumnIndex": col_count
+                        },
+                        "cell": {
+                            "userEnteredFormat": {
+                                "textFormat": {"bold": True}
+                            }
+                        },
+                        "fields": "userEnteredFormat.textFormat.bold"
+                    }
+                })
 
-        if fields:
-            requests.append({
-                "repeatCell": {
-                    "range": {
-                        "sheetId": sheet_id,
-                        "startRowIndex": start_row,
-                        "endRowIndex": end_row,
-                        "startColumnIndex": 0,
-                        "endColumnIndex": col_count
-                    },
-                    "cell": {"userEnteredFormat": fmt},
-                    "fields": ",".join(fields)
-                }
-            })
-            req_bg_bold += 1
-
-        # (2) 중개업소 컬럼: 부분 글자색(초록/빨강)
-        if len(row) > COL_중개업소:
-            joined = str(row[COL_중개업소] or "")
-            if joined:
+            # 중개업소 컬럼 부분색 적용
+            if len(row) > COL_중개업소:
+                joined = str(row[COL_중개업소] or "")
                 names = [normalize(s) for s in joined.split(",") if normalize(s)]
-            else:
-                names = []
 
-            if joined and names:
-                segments = []
-                cur = 0
+                if names and complex_name not in EXCLUDED_COMPLEXES:
+                    segments = []
+                    search_from = 0
+                    valid_canon = alias.get("validCanonNames", set())
 
-                for name_idx, name in enumerate(names):
-                    s = joined.find(name, cur)
-                    if s == -1:
-                        s = joined.find(name)
-                    if s == -1:
-                        continue
-                    e = s + len(name)
+                    for name in names:
+                        start = joined.find(name, search_from)
+                        if start < 0:
+                            start = joined.find(name)
+                        if start < 0:
+                            continue
+                        end = start + len(name)
+                        search_from = end
 
-                    was_owner = it.get("상태", {}).get(name, False)
+                        was_owner = it.get("상태", {}).get(name, False)
 
-                    # 제외 단지는 색상 적용 안 함
-                    if complex_name in EXCLUDED_COMPLEXES:
-                        color = None
-                    else:
-                        # 안전장치: validCanonNames가 비어있으면 '미등록' 판단은 스킵(저빈도만 적용)
-                        not_in_canon = False if not valid_canon else (name not in valid_canon)
+                        not_in_canon = name not in valid_canon
                         low = brokerage_counts.get(name, 0) <= LOW_FREQUENCY_THRESHOLD
 
+                        # 우선순위: 집주인(초록) > (탭없음/저빈도)(빨강)
                         if was_owner:
                             color = COLOR_집주인_TEXT
-                        elif not_in_canon:
-                            color = COLOR_저빈도_TEXT
-                        elif low:
+                        elif not_in_canon or low:
                             color = COLOR_저빈도_TEXT
                         else:
                             color = None
 
-                    if color:
-                        segments.append({"start": s, "end": e, "color": color})
+                        if color:
+                            segments.append({"start": start, "end": end, "color": color})
 
-                    cur = e
-                    if name_idx < len(names) - 1:
-                        comma_pos = joined.find(", ", cur)
-                        if comma_pos != -1:
-                            cur = comma_pos + 2
+                    if segments:
+                        text_runs = _make_text_format_runs(joined, segments)
 
-                if segments:
-                    runs = build_text_runs(joined, segments, debug_row=row_num_1based)
-                    if runs:
                         requests.append({
                             "updateCells": {
                                 "range": {
@@ -962,59 +971,51 @@ def apply_styles_and_alignment(sheet_service, spreadsheet_id, sheet_id, infos, h
                                 "rows": [{
                                     "values": [{
                                         "userEnteredValue": {"stringValue": joined},
+                                        "textFormatRuns": text_runs,
                                         "userEnteredFormat": {
                                             "textFormat": {"foregroundColor": DEFAULT_BLACK}
-                                        },
-                                        "textFormatRuns": runs
+                                        }
                                     }]
                                 }],
-                                "fields": "userEnteredValue,userEnteredFormat.textFormat.foregroundColor,textFormatRuns"
+                                "fields": "userEnteredValue,textFormatRuns,userEnteredFormat.textFormat.foregroundColor"
                             }
                         })
-                        req_rich += 1
 
-    # (3) 정렬(센터): 1~8열
-    align_cols = min(col_count, 8)
-    if align_cols > 0:
-        requests.append({
-            "repeatCell": {
-                "range": {
-                    "sheetId": sheet_id,
-                    "startRowIndex": header_row,
-                    "endRowIndex": header_row + row_count,
-                    "startColumnIndex": 0,
-                    "endColumnIndex": align_cols
-                },
-                "cell": {"userEnteredFormat": {"horizontalAlignment": "CENTER"}},
-                "fields": "userEnteredFormat.horizontalAlignment"
-            }
-        })
+        # 정렬(기존 유지)
+        align_cols = min(col_count, 8)
+        if align_cols > 0:
+            requests.append({
+                "repeatCell": {
+                    "range": {
+                        "sheetId": sheet_id,
+                        "startRowIndex": header_row,
+                        "endRowIndex": header_row + row_count,
+                        "startColumnIndex": 0,
+                        "endColumnIndex": align_cols
+                    },
+                    "cell": {"userEnteredFormat": {"horizontalAlignment": "CENTER"}},
+                    "fields": "userEnteredFormat.horizontalAlignment"
+                }
+            })
 
-    print(f"[디버그] 스타일 요청 생성: 총 {len(requests)}개 (배경/볼드 repeatCell={req_bg_bold}, RichText updateCells={req_rich})")
+        # ---------- batchUpdate 청크 실행 ----------
+        if requests:
+            print(f"[디버그] 스타일 요청 생성: 총 {len(requests)}개")
+            CHUNK = 500
+            for i in range(0, len(requests), CHUNK):
+                chunk = requests[i:i+CHUNK]
+                print(f"[디버그] batchUpdate 실행: {i+1} ~ {i+len(chunk)}")
+                sheet_service.spreadsheets().batchUpdate(
+                    spreadsheetId=spreadsheet_id,
+                    body={"requests": chunk}
+                ).execute()
+            print("스타일 적용 완료")
 
-    if not requests:
-        return
+    except Exception as e:
+        print(f"스타일 적용 오류: {e}")
+        import traceback
+        traceback.print_exc()
 
-    # batchUpdate 안정화: chunk 분할
-    CHUNK = 600
-    try:
-        for i in range(0, len(requests), CHUNK):
-            chunk = requests[i:i+CHUNK]
-            print(f"[디버그] batchUpdate 실행: {i+1} ~ {i+len(chunk)}")
-            sheet_service.spreadsheets().batchUpdate(
-                spreadsheetId=spreadsheet_id,
-                body={"requests": chunk}
-            ).execute()
-        print("스타일 적용 완료")
-    except HttpError as e:
-        print("\n" + "="*90)
-        print("❌ batchUpdate 실패(HttpError) - 응답 바디")
-        try:
-            print(e.content.decode("utf-8"))
-        except Exception:
-            print(str(e))
-        print("="*90)
-        raise
 
 def process_real_estate_data(spreadsheet, worksheet, sheet_service, spreadsheet_id):
     """데이터 정리 함수"""
