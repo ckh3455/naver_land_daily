@@ -593,7 +593,8 @@ LOW_FREQUENCY_THRESHOLD = 3
 def normalize(v):
     if v is None:
         return ""
-    return str(v).strip().replace("  ", " ").replace("  ", " ")
+    # 모든 종류의 공백(탭/개행/연속 공백 등)을 1칸으로 축약
+    return re.sub(r"\s+", " ", str(v)).strip()
 
 def extract_dong_number(s):
     if not isinstance(s, str):
@@ -737,6 +738,8 @@ def process_duplicate_listings(rows, alias):
             display_name = alias.get("byId", {}).get(raw_id)
         if not display_name:
             display_name = raw_name
+        # 공백/특수공백 차이로 인한 "집주인/저빈도" 매칭 실패 방지
+        display_name = normalize(display_name)
 
         owner = normalize(r[COL_집주인] if len(r) > COL_집주인 else "") == "집주인"
 
@@ -924,21 +927,26 @@ def apply_styles_and_alignment(sheet_service, spreadsheet_id, sheet_id, infos, h
             # 중개업소 컬럼 부분색 적용
             if len(row) > COL_중개업소:
                 joined = str(row[COL_중개업소] or "")
-                names = [normalize(s) for s in joined.split(",") if normalize(s)]
 
-                if names and complex_name not in EXCLUDED_COMPLEXES:
+                if joined and complex_name not in EXCLUDED_COMPLEXES:
                     segments = []
-                    search_from = 0
                     valid_canon = alias.get("validCanonNames", set())
 
-                    for name in names:
-                        start = joined.find(name, search_from)
-                        if start < 0:
-                            start = joined.find(name)
-                        if start < 0:
+                    # joined에서 콤마 단위 토큰의 "실제 위치"를 얻어 정확히 부분색을 적용한다.
+                    # (normalize()된 문자열을 find()로 찾지 않기 때문에 공백/특수공백 차이로 인한 누락을 방지)
+                    for mm in re.finditer(r"[^,]+", joined):
+                        token = mm.group(0)
+
+                        # 토큰 내부의 좌/우 공백을 제외한 실제 이름 구간 계산
+                        left_ws = len(token) - len(token.lstrip())
+                        right_ws = len(token) - len(token.rstrip())
+                        name_raw = token.strip()
+                        name = normalize(name_raw)
+                        if not name:
                             continue
-                        end = start + len(name)
-                        search_from = end
+
+                        start = mm.start() + left_ws
+                        end = mm.end() - right_ws
 
                         was_owner = it.get("상태", {}).get(name, False)
 
@@ -953,9 +961,8 @@ def apply_styles_and_alignment(sheet_service, spreadsheet_id, sheet_id, infos, h
                         else:
                             color = None
 
-                        if color:
+                        if color and 0 <= start < end <= len(joined):
                             segments.append({"start": start, "end": end, "color": color})
-
                     if segments:
                         text_runs = _make_text_format_runs(joined, segments)
 
