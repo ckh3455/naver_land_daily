@@ -443,8 +443,8 @@ class AggressiveCardScroll:
                     new_count = len(self.property_cards) - prev_count
                     debug_log(f"🎉 새 매물 {new_count}개 추가! (총 {len(self.property_cards)}개)", "SUCCESS")
 
-                if scroll_attempts >= 100:
-                    debug_log(f"⛔ 안전중단: 100회 스크롤 시도 초과 (총 {len(self.property_cards)}개 수집)", "WARNING")
+                if scroll_attempts >= 150:
+                    debug_log(f"⛔ 안전중단: 150회 스크롤 시도 초과 (총 {len(self.property_cards)}개 수집)", "WARNING")
                     break
 
             except Exception as e:
