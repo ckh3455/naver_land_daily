@@ -580,7 +580,7 @@ COLOR_월세 = {"red": 0.882, "green": 0.914, "blue": 0.788}
 COLOR_압구정원 = {"red": 0.812, "green": 0.886, "blue": 0.953}
 COLOR_집주인_TEXT = {"red": 0.416, "green": 0.659, "blue": 0.310}
 COLOR_저빈도_TEXT = {"red": 0.800, "green": 0.000, "blue": 0.000}
-# ✅ 추가: 집주인이면서 저빈도/탭없음인 경우 보라색
+# ✅ 집주인 + (탭없음 또는 저빈도) 보라색
 COLOR_집주인_저빈도_TEXT = {"red": 0.600, "green": 0.200, "blue": 0.800}
 
 DEFAULT_BLACK = {"red": 0, "green": 0, "blue": 0}
@@ -595,8 +595,11 @@ LOW_FREQUENCY_THRESHOLD = 3
 def normalize(v):
     if v is None:
         return ""
+    s = str(v)
+    # ✅ 제로폭 공백/보이지 않는 문자 제거 (탭 목록 매칭 실패 방지)
+    s = re.sub(r"[\u200b\u200c\u200d\ufeff]", "", s)
     # 모든 종류의 공백(탭/개행/연속 공백 등)을 1칸으로 축약
-    return re.sub(r"\s+", " ", str(v)).strip()
+    return re.sub(r"\s+", " ", s).strip()
 
 def extract_dong_number(s):
     if not isinstance(s, str):
@@ -621,11 +624,12 @@ def extract_area_number(s):
             return 0
     return 0
 
-# ✅ (통합) 테스트버전 성공과 동일: validCanonNames 포함
+# ✅ (통합) 테스트버전 성공과 동일: validCanonNames 포함 + knownCanonNames(탭존재 판정 강화)
 def load_brokerage_alias_maps(sheet_service, spreadsheet_id):
     by_name = {}
     by_id = {}
-    valid_canon_names = set()  # '실제상호' 전체 값(빨간색 판정용)
+    valid_canon_names = set()   # '실제상호' 전체 값
+    known_canon_names = set()   # ✅ 탭에 존재하는 것으로 판정할 집합(실제상호 + 매핑값)
 
     try:
         sheet_metadata = sheet_service.spreadsheets().get(
@@ -640,7 +644,7 @@ def load_brokerage_alias_maps(sheet_service, spreadsheet_id):
 
         if alias_sheet_id is None:
             print(f"'{ALIAS_SHEET_NAME}' 시트를 찾을 수 없습니다.")
-            return {"byName": by_name, "byId": by_id, "validCanonNames": valid_canon_names}
+            return {"byName": by_name, "byId": by_id, "validCanonNames": valid_canon_names, "knownCanonNames": known_canon_names}
 
         result = sheet_service.spreadsheets().values().get(
             spreadsheetId=spreadsheet_id,
@@ -649,7 +653,7 @@ def load_brokerage_alias_maps(sheet_service, spreadsheet_id):
 
         values = result.get('values', [])
         if len(values) < 2:
-            return {"byName": by_name, "byId": by_id, "validCanonNames": valid_canon_names}
+            return {"byName": by_name, "byId": by_id, "validCanonNames": valid_canon_names, "knownCanonNames": known_canon_names}
 
         header = values[0]
         idx_name = header.index(ALIAS_HEADER_NAME) if ALIAS_HEADER_NAME in header else -1
@@ -657,7 +661,7 @@ def load_brokerage_alias_maps(sheet_service, spreadsheet_id):
         idx_canon = header.index(ALIAS_HEADER_CANON) if ALIAS_HEADER_CANON in header else -1
 
         if idx_canon < 0:
-            return {"byName": by_name, "byId": by_id, "validCanonNames": valid_canon_names}
+            return {"byName": by_name, "byId": by_id, "validCanonNames": valid_canon_names, "knownCanonNames": known_canon_names}
 
         for row in values[1:]:
             if len(row) <= idx_canon:
@@ -679,11 +683,25 @@ def load_brokerage_alias_maps(sheet_service, spreadsheet_id):
                 if id_val:
                     by_id[id_val] = canon
 
-        print(f"[Alias] byName={len(by_name)}, byId={len(by_id)}, validCanonNames={len(valid_canon_names)}")
+        # ✅ '탭에 존재' 판정용 확장 집합(실제상호 + 매핑값) 생성
+        for x in valid_canon_names:
+            nx = normalize(x)
+            if nx:
+                known_canon_names.add(nx)
+        for x in by_name.values():
+            nx = normalize(x)
+            if nx:
+                known_canon_names.add(nx)
+        for x in by_id.values():
+            nx = normalize(x)
+            if nx:
+                known_canon_names.add(nx)
+
+        print(f"[Alias] byName={len(by_name)}, byId={len(by_id)}, validCanonNames={len(valid_canon_names)}, knownCanonNames={len(known_canon_names)}")
     except Exception as e:
         print(f"매핑 로드 오류: {e}")
 
-    return {"byName": by_name, "byId": by_id, "validCanonNames": valid_canon_names}
+    return {"byName": by_name, "byId": by_id, "validCanonNames": valid_canon_names, "knownCanonNames": known_canon_names}
 
 
 def sort_and_group_data(rows):
@@ -932,7 +950,8 @@ def apply_styles_and_alignment(sheet_service, spreadsheet_id, sheet_id, infos, h
 
                 if joined and complex_name not in EXCLUDED_COMPLEXES:
                     segments = []
-                    valid_canon = alias.get("validCanonNames", set())
+                    # ✅ 탭 존재 판정은 knownCanonNames(없으면 validCanonNames fallback)
+                    valid_canon = alias.get("knownCanonNames", alias.get("validCanonNames", set()))
 
                     # joined에서 콤마 단위 토큰의 "실제 위치"를 얻어 정확히 부분색을 적용한다.
                     # (normalize()된 문자열을 find()로 찾지 않기 때문에 공백/특수공백 차이로 인한 누락을 방지)
@@ -955,7 +974,7 @@ def apply_styles_and_alignment(sheet_service, spreadsheet_id, sheet_id, infos, h
                         not_in_canon = name not in valid_canon
                         low = brokerage_counts.get(name, 0) <= LOW_FREQUENCY_THRESHOLD
 
-                        # ✅ 변경된 우선순위:
+                        # ✅ 우선순위:
                         # 1) 집주인 + (탭없음 또는 저빈도) => 보라
                         # 2) 집주인 => 초록
                         # 3) (탭없음 또는 저빈도) => 빨강
@@ -970,6 +989,7 @@ def apply_styles_and_alignment(sheet_service, spreadsheet_id, sheet_id, infos, h
 
                         if color and 0 <= start < end <= len(joined):
                             segments.append({"start": start, "end": end, "color": color})
+
                     if segments:
                         text_runs = _make_text_format_runs(joined, segments)
 
@@ -1070,7 +1090,7 @@ def process_real_estate_data(spreadsheet, worksheet, sheet_service, spreadsheet_
 
         header_col_count = 21
 
-        # ✅ (통합) validCanonNames 포함
+        # ✅ (통합) validCanonNames + knownCanonNames 포함
         alias = load_brokerage_alias_maps(sheet_service, spreadsheet_id)
 
         raw_data = values[header_row:]
