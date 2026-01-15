@@ -580,6 +580,8 @@ COLOR_월세 = {"red": 0.882, "green": 0.914, "blue": 0.788}
 COLOR_압구정원 = {"red": 0.812, "green": 0.886, "blue": 0.953}
 COLOR_집주인_TEXT = {"red": 0.416, "green": 0.659, "blue": 0.310}
 COLOR_저빈도_TEXT = {"red": 0.800, "green": 0.000, "blue": 0.000}
+# ✅ 추가: 집주인이면서 저빈도/탭없음인 경우 보라색
+COLOR_집주인_저빈도_TEXT = {"red": 0.600, "green": 0.200, "blue": 0.800}
 
 DEFAULT_BLACK = {"red": 0, "green": 0, "blue": 0}
 
@@ -953,8 +955,13 @@ def apply_styles_and_alignment(sheet_service, spreadsheet_id, sheet_id, infos, h
                         not_in_canon = name not in valid_canon
                         low = brokerage_counts.get(name, 0) <= LOW_FREQUENCY_THRESHOLD
 
-                        # 우선순위: 집주인(초록) > (탭없음/저빈도)(빨강)
-                        if was_owner:
+                        # ✅ 변경된 우선순위:
+                        # 1) 집주인 + (탭없음 또는 저빈도) => 보라
+                        # 2) 집주인 => 초록
+                        # 3) (탭없음 또는 저빈도) => 빨강
+                        if was_owner and (not_in_canon or low):
+                            color = COLOR_집주인_저빈도_TEXT
+                        elif was_owner:
                             color = COLOR_집주인_TEXT
                         elif not_in_canon or low:
                             color = COLOR_저빈도_TEXT
