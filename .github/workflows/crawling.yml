@@ -1,65 +1,32 @@
-name: 네이버 부동산 크롤링 및 데이터 정리
+name: 네이버 부동산 크롤링 및 데이터 정리 (검증 모드)
 
 on:
+  workflow_dispatch:
   schedule:
     # 매일 오전 3시 (한국 시간) = UTC 18시
     - cron: '0 18 * * *'
-  workflow_dispatch:  # 수동 실행 버튼
 
 jobs:
   crawl-and-process:
-    runs-on: ubuntu-22.04  # Ubuntu 22.04로 고정 (Playwright 호환성)
-    timeout-minutes: 60  # 최대 1시간
-    
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+
     steps:
     - name: 코드 체크아웃
       uses: actions/checkout@v4
-    
+
     - name: Python 3.11 설정
       uses: actions/setup-python@v4
       with:
         python-version: '3.11'
         cache: 'pip'
-    
-    - name: 시스템 의존성 설치
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y \
-          libnss3 \
-          libatk-bridge2.0-0 \
-          libdrm2 \
-          libxkbcommon0 \
-          libxcomposite1 \
-          libxdamage1 \
-          libxfixes3 \
-          libxrandr2 \
-          libgbm1 \
-          libasound2
-    
+
     - name: Python 의존성 설치
       run: |
         python -m pip install --upgrade pip
         pip install -r requirements.txt
-    
-    - name: Playwright 브라우저 설치
-      run: |
-        playwright install chromium
-        playwright install-deps chromium
-    
-    - name: 파일 목록 확인 (디버깅)
-      run: |
-        echo "=== 현재 디렉토리 ==="
-        pwd
-        echo ""
-        echo "=== 전체 파일 목록 ==="
-        ls -la
-        echo ""
-        echo "=== Python 파일 목록 ==="
-        find . -name "*.py" -type f | head -20 || echo "Python 파일 없음"
-        echo ""
-        echo "=== 루트 디렉토리 Python 파일 ==="
-        ls -la *.py 2>/dev/null || echo "루트에 Python 파일 없음"
-    
+        python -m playwright install --with-deps chromium
+
     - name: 서비스 계정 키 생성
       run: |
         cat << 'EOF' > service_account.json
@@ -67,37 +34,52 @@ jobs:
         EOF
         echo "서비스 계정 파일 생성 완료"
         ls -lh service_account.json
-    
-    - name: 크롤링 및 데이터 정리 실행
+
+    # ✅ 핵심: 코드 실행 전에 네이버 접속 자체가 되는지 먼저 확인
+    - name: 네이버 접속 사전 점검 (curl)
+      run: |
+        set -x
+        date
+        echo "=== curl HEAD 체크 ==="
+        curl -I -L --max-time 20 https://new.land.naver.com/complexes/728 || true
+        curl -I -L --max-time 20 https://new.land.naver.com/complexes/742 || true
+        echo "=== curl GET 체크(간단) ==="
+        curl -L --max-time 20 -o /dev/null -s -w "HTTP:%{http_code}  TOTAL:%{time_total}s\n" https://new.land.naver.com/complexes/728 || true
+
+    - name: 크롤링 및 데이터 정리 실행 (검증 모드)
       env:
         SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
+        PYTHONUNBUFFERED: "1"
+
+        # ✅ 검증 모드: 단지/스크롤 제한 (코드에서 env 읽어 적용)
+        VERIFY_MODE: "1"
+        VERIFY_MAX_COMPLEXES: "2"
+        VERIFY_MAX_SCROLLS: "10"
+
+        # (선택) 프록시 쓸 경우 secrets.PROXY_SERVER 추가 후 아래 주석 해제
+        # PROXY_SERVER: ${{ secrets.PROXY_SERVER }}
+
       run: |
         echo "=== 크롤러 파일 찾기 ==="
         if [ -f "main_github.py" ]; then
           echo "✅ main_github.py 발견"
-          python main_github.py
+          python -u main_github.py
         elif [ -f "crawler_with_processor.py" ]; then
           echo "✅ crawler_with_processor.py 발견"
-          python crawler_with_processor.py
+          python -u crawler_with_processor.py
         elif [ -f "naver_crawler_playwright.py" ]; then
           echo "⚠️  main_github.py를 찾을 수 없습니다."
           echo "⚠️  naver_crawler_playwright.py를 사용합니다."
-          python naver_crawler_playwright.py
+          python -u naver_crawler_playwright.py
         else
           echo "❌ 오류: 크롤러 파일을 찾을 수 없습니다!"
-          echo ""
           echo "현재 디렉토리의 Python 파일:"
           ls -la *.py 2>/dev/null || echo "  (없음)"
-          echo ""
           echo "하위 디렉토리의 Python 파일:"
-          find . -name "*.py" -type f | head -10
-          echo ""
-          echo "💡 해결 방법:"
-          echo "   1. GitHub 저장소에 main_github.py 파일을 업로드하세요"
-          echo "   2. 또는 저장소 루트에 파일이 있는지 확인하세요"
+          find . -name "*.py" -type f | head -20
           exit 1
         fi
-    
+
     - name: 크롤링 결과 업로드
       uses: actions/upload-artifact@v4
       if: always()
@@ -106,9 +88,8 @@ jobs:
         path: |
           crawling_results.json
         retention-days: 30
-    
+
     - name: 정리
       if: always()
       run: |
         rm -f service_account.json
-
