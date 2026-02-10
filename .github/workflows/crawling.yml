@@ -105,7 +105,7 @@ jobs:
           name: crawling-results-${{ github.run_number }}
           path: |
             crawling_results.json
-        retention-days: 30
+    retention-days: 30
 
       - name: 정리
         if: always()
