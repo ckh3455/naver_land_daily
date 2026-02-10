@@ -2,6 +2,7 @@ name: 네이버 부동산 크롤링 및 데이터 정리 (Windows Self-hosted)
 
 on:
   schedule:
+    # 매일 오전 3시 (한국 시간) = UTC 18시
     - cron: '0 18 * * *'
   workflow_dispatch:
 
@@ -83,19 +84,28 @@ jobs:
           Write-Host "=== Python 파일 목록(상위 20개) ==="
           Get-ChildItem -Recurse -Filter *.py -File | Select-Object -First 20 | ForEach-Object { $_.FullName }
 
-      - name: 서비스 계정 키 생성
+      - name: 서비스 계정 키 생성 (BOM 제거, UTF-8 no BOM)
         shell: powershell
         run: |
           chcp 65001 | Out-Null
           [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false
           $OutputEncoding = New-Object System.Text.UTF8Encoding $false
 
-          @'
-          ${{ secrets.SERVICE_ACCOUNT_JSON }}
-          '@ | Out-File -FilePath service_account.json -Encoding utf8 -Force
+          $json = @'
+${{ secrets.SERVICE_ACCOUNT_JSON }}
+'@
 
-          Write-Host "서비스 계정 파일 생성 완료"
-          Get-Item service_account.json | Format-List
+          # 문자열 앞/중간에 섞인 UTF-8 BOM(U+FEFF) 제거
+          $json = $json -replace "^\uFEFF", ""
+          $json = $json -replace "\uFEFF", ""
+
+          # UTF-8 (BOM 없음) 저장
+          [System.IO.File]::WriteAllText("service_account.json", $json, New-Object System.Text.UTF8Encoding($false))
+
+          Write-Host "service_account.json 생성 완료(UTF-8 no BOM)"
+          $bytes = [IO.File]::ReadAllBytes("service_account.json")
+          $head = $bytes[0..([Math]::Min(9, $bytes.Length-1))]
+          Write-Host ("첫 바이트(최대 10): " + ([BitConverter]::ToString($head)))
 
       - name: 크롤링 및 데이터 정리 실행 (절대경로 Python)
         shell: powershell
