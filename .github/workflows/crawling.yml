@@ -15,10 +15,6 @@ jobs:
       - name: 코드 체크아웃
         uses: actions/checkout@v4
 
-      # ✅ Windows self-hosted에서 Python을 자동으로 맞추기 위한 단계
-      # ⚠️ runner 서비스 계정이 HKLM 레지스트리를 못 건드리면 setup-python이 실패할 수 있습니다.
-      #    그 경우 (1) runner 서비스를 로컬 관리자 계정으로 실행하거나,
-      #    (2) 아래 setup-python을 제거하고 PC에 설치된 Python을 사용하세요.
       - name: Python 3.11 설정
         uses: actions/setup-python@v4
         with:
@@ -59,7 +55,6 @@ jobs:
       - name: 서비스 계정 키 생성
         shell: pwsh
         run: |
-          # secrets.SERVICE_ACCOUNT_JSON 가 "JSON 문자열" 그대로 들어있다는 전제
           @'
           ${{ secrets.SERVICE_ACCOUNT_JSON }}
           '@ | Out-File -FilePath service_account.json -Encoding utf8 -Force
@@ -105,7 +100,7 @@ jobs:
           name: crawling-results-${{ github.run_number }}
           path: |
             crawling_results.json
-    retention-days: 30
+          retention-days: 30
 
       - name: 정리
         if: always()
