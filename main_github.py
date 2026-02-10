@@ -248,11 +248,17 @@ class AggressiveCardScroll:
         self.api_responses = []
         self.more_data = True
 
+    # --------------------------------------------------------------------
+    # ✅ 접속(네트워크) 부분만 수정:
+    #   1) PROXY_SERVER 지원
+    # --------------------------------------------------------------------
     async def setup_playwright(self):
         debug_log("=== Playwright 환경 설정 시작 ===", "STEP")
         try:
             self.playwright = await async_playwright().start()
-            self.browser = await self.playwright.chromium.launch(
+
+            proxy_server = os.getenv("PROXY_SERVER", "").strip()
+            launch_kwargs = dict(
                 headless=True,
                 args=[
                     '--disable-blink-features=AutomationControlled',
@@ -264,6 +270,12 @@ class AggressiveCardScroll:
                     '--window-size=1920,1080'
                 ]
             )
+            if proxy_server:
+                launch_kwargs["proxy"] = {"server": proxy_server}
+                debug_log(f"[PROXY] enabled: {proxy_server}", "WARNING")
+
+            self.browser = await self.playwright.chromium.launch(**launch_kwargs)
+
             self.context = await self.browser.new_context(
                 viewport={'width': 1920, 'height': 1080},
                 user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -276,6 +288,7 @@ class AggressiveCardScroll:
                     'Upgrade-Insecure-Requests': '1',
                 }
             )
+
             self.page = await self.context.new_page()
             self.page.on('response', self.handle_response)
         except Exception as e:
@@ -327,10 +340,30 @@ class AggressiveCardScroll:
             return self.more_data
         return False
 
+    # --------------------------------------------------------------------
+    # ✅ 접속(네트워크) 부분만 수정:
+    #   2) page.goto 재시도(backoff) 추가
+    # --------------------------------------------------------------------
+    async def _goto_with_retry(self, url, wait_until='domcontentloaded', timeout=60000, attempts=5):
+        last_err = None
+        for i in range(1, attempts + 1):
+            try:
+                debug_log(f"[GOTO] {url} (try {i}/{attempts})", "DEBUG")
+                await self.page.goto(url, wait_until=wait_until, timeout=timeout)
+                return True
+            except Exception as e:
+                last_err = e
+                debug_log(f"[GOTO FAIL] {url} (try {i}/{attempts}) - {e}", "WARNING")
+                # 점진적 backoff
+                await asyncio.sleep(min(2 * i, 10))
+        raise last_err
+
     async def navigate_to_complex_page(self):
         debug_log("=== 단지 페이지 이동 시작 ===", "STEP")
         try:
-            await self.page.goto(self.base_url, wait_until='domcontentloaded', timeout=60000)
+            # ✅ 기존 page.goto를 재시도 버전으로만 교체 (나머지 로직 유지)
+            await self._goto_with_retry(self.base_url, wait_until='domcontentloaded', timeout=60000, attempts=5)
+
             await asyncio.sleep(3)
             debug_log("상세매물검색 버튼 클릭 시도...", "DEBUG")
             try:
