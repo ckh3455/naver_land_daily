@@ -1,95 +1,114 @@
-name: 네이버 부동산 크롤링 및 데이터 정리 (검증 모드)
+name: 네이버 부동산 크롤링 및 데이터 정리 (Windows Self-hosted)
 
 on:
-  workflow_dispatch:
   schedule:
     # 매일 오전 3시 (한국 시간) = UTC 18시
     - cron: '0 18 * * *'
+  workflow_dispatch:
 
 jobs:
   crawl-and-process:
-    runs-on: self-hosted
-    timeout-minutes: 30
+    runs-on: [self-hosted, windows]
+    timeout-minutes: 60
 
     steps:
-    - name: 코드 체크아웃
-      uses: actions/checkout@v4
+      - name: 코드 체크아웃
+        uses: actions/checkout@v4
 
-    - name: Python 3.11 설정
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.11'
-        cache: 'pip'
+      # ✅ Windows self-hosted에서 Python을 자동으로 맞추기 위한 단계
+      # ⚠️ runner 서비스 계정이 HKLM 레지스트리를 못 건드리면 setup-python이 실패할 수 있습니다.
+      #    그 경우 (1) runner 서비스를 로컬 관리자 계정으로 실행하거나,
+      #    (2) 아래 setup-python을 제거하고 PC에 설치된 Python을 사용하세요.
+      - name: Python 3.11 설정
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+          cache: 'pip'
 
-    - name: Python 의존성 설치
-      run: |
-        python -m pip install --upgrade pip
-        pip install -r requirements.txt
-        python -m playwright install --with-deps chromium
+      - name: Python/경로 확인
+        shell: pwsh
+        run: |
+          Write-Host "=== Python 버전 ==="
+          python --version
+          Write-Host "=== Python 경로 ==="
+          where.exe python
 
-    - name: 서비스 계정 키 생성
-      run: |
-        cat << 'EOF' > service_account.json
-        ${{ secrets.SERVICE_ACCOUNT_JSON }}
-        EOF
-        echo "서비스 계정 파일 생성 완료"
-        ls -lh service_account.json
+      - name: Python 의존성 설치
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
-    # ✅ 핵심: 코드 실행 전에 네이버 접속 자체가 되는지 먼저 확인
-    - name: 네이버 접속 사전 점검 (curl)
-      run: |
-        set -x
-        date
-        echo "=== curl HEAD 체크 ==="
-        curl -I -L --max-time 20 https://new.land.naver.com/complexes/728 || true
-        curl -I -L --max-time 20 https://new.land.naver.com/complexes/742 || true
-        echo "=== curl GET 체크(간단) ==="
-        curl -L --max-time 20 -o /dev/null -s -w "HTTP:%{http_code}  TOTAL:%{time_total}s\n" https://new.land.naver.com/complexes/728 || true
+      - name: Playwright 브라우저 설치 (Windows)
+        shell: pwsh
+        run: |
+          python -m playwright install chromium
 
-    - name: 크롤링 및 데이터 정리 실행 (검증 모드)
-      env:
-        SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
-        PYTHONUNBUFFERED: "1"
+      - name: 파일 목록 확인 (디버깅)
+        shell: pwsh
+        run: |
+          Write-Host "=== 현재 디렉토리 ==="
+          Get-Location
+          Write-Host ""
+          Write-Host "=== 전체 파일 목록 ==="
+          Get-ChildItem -Force
+          Write-Host ""
+          Write-Host "=== Python 파일 목록(상위 20개) ==="
+          Get-ChildItem -Recurse -Filter *.py -File | Select-Object -First 20 | ForEach-Object { $_.FullName }
 
-        # ✅ 검증 모드: 단지/스크롤 제한 (코드에서 env 읽어 적용)
-        VERIFY_MODE: "1"
-        VERIFY_MAX_COMPLEXES: "2"
-        VERIFY_MAX_SCROLLS: "10"
+      - name: 서비스 계정 키 생성
+        shell: pwsh
+        run: |
+          # secrets.SERVICE_ACCOUNT_JSON 가 "JSON 문자열" 그대로 들어있다는 전제
+          @'
+          ${{ secrets.SERVICE_ACCOUNT_JSON }}
+          '@ | Out-File -FilePath service_account.json -Encoding utf8 -Force
 
-        # (선택) 프록시 쓸 경우 secrets.PROXY_SERVER 추가 후 아래 주석 해제
-        # PROXY_SERVER: ${{ secrets.PROXY_SERVER }}
+          Write-Host "서비스 계정 파일 생성 완료"
+          Get-Item service_account.json | Format-List
 
-      run: |
-        echo "=== 크롤러 파일 찾기 ==="
-        if [ -f "main_github.py" ]; then
-          echo "✅ main_github.py 발견"
-          python -u main_github.py
-        elif [ -f "crawler_with_processor.py" ]; then
-          echo "✅ crawler_with_processor.py 발견"
-          python -u crawler_with_processor.py
-        elif [ -f "naver_crawler_playwright.py" ]; then
-          echo "⚠️  main_github.py를 찾을 수 없습니다."
-          echo "⚠️  naver_crawler_playwright.py를 사용합니다."
-          python -u naver_crawler_playwright.py
-        else
-          echo "❌ 오류: 크롤러 파일을 찾을 수 없습니다!"
-          echo "현재 디렉토리의 Python 파일:"
-          ls -la *.py 2>/dev/null || echo "  (없음)"
-          echo "하위 디렉토리의 Python 파일:"
-          find . -name "*.py" -type f | head -20
-          exit 1
-        fi
+      - name: 크롤링 및 데이터 정리 실행
+        shell: pwsh
+        env:
+          SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
+        run: |
+          Write-Host "=== 크롤러 파일 찾기 ==="
 
-    - name: 크롤링 결과 업로드
-      uses: actions/upload-artifact@v4
-      if: always()
-      with:
-        name: crawling-results-${{ github.run_number }}
-        path: |
-          crawling_results.json
+          if (Test-Path "main_github.py") {
+            Write-Host "✅ main_github.py 발견"
+            python main_github.py
+
+          } elseif (Test-Path "crawler_with_processor.py") {
+            Write-Host "✅ crawler_with_processor.py 발견"
+            python crawler_with_processor.py
+
+          } elseif (Test-Path "naver_crawler_playwright.py") {
+            Write-Host "⚠️  main_github.py를 찾을 수 없습니다."
+            Write-Host "⚠️  naver_crawler_playwright.py를 사용합니다."
+            python naver_crawler_playwright.py
+
+          } else {
+            Write-Error "❌ 오류: 크롤러 파일을 찾을 수 없습니다!"
+            Write-Host ""
+            Write-Host "현재 디렉토리의 Python 파일:"
+            Get-ChildItem -Filter *.py -File -ErrorAction SilentlyContinue | Format-Table -Auto
+            Write-Host ""
+            Write-Host "하위 디렉토리의 Python 파일:"
+            Get-ChildItem -Recurse -Filter *.py -File | Select-Object -First 20 | ForEach-Object { $_.FullName }
+            exit 1
+          }
+
+      - name: 크롤링 결과 업로드
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: crawling-results-${{ github.run_number }}
+          path: |
+            crawling_results.json
         retention-days: 30
 
-    - name: 정리
-      if: always()
-      run: |
-        rm -f service_account.json
+      - name: 정리
+        if: always()
+        shell: pwsh
+        run: |
+          Remove-Item -Force service_account.json -ErrorAction SilentlyContinue
