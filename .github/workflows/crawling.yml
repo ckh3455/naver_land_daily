@@ -2,7 +2,6 @@ name: 네이버 부동산 크롤링 및 데이터 정리 (Windows Self-hosted)
 
 on:
   schedule:
-    # 매일 오전 3시 (한국 시간) = UTC 18시
     - cron: '0 18 * * *'
   workflow_dispatch:
 
@@ -17,6 +16,9 @@ jobs:
 
       - name: Runner 환경 진단 (UTF-8)
         shell: powershell
+        env:
+          PYTHONUTF8: "1"
+          PYTHONIOENCODING: "utf-8"
         run: |
           chcp 65001 | Out-Null
           [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false
@@ -41,6 +43,9 @@ jobs:
 
       - name: Python 의존성 설치 (절대경로 Python)
         shell: powershell
+        env:
+          PYTHONUTF8: "1"
+          PYTHONIOENCODING: "utf-8"
         run: |
           chcp 65001 | Out-Null
           [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false
@@ -52,6 +57,9 @@ jobs:
 
       - name: Playwright 브라우저 설치 (Windows)
         shell: powershell
+        env:
+          PYTHONUTF8: "1"
+          PYTHONIOENCODING: "utf-8"
         run: |
           chcp 65001 | Out-Null
           [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false
@@ -93,6 +101,8 @@ jobs:
         shell: powershell
         env:
           SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
+          PYTHONUTF8: "1"
+          PYTHONIOENCODING: "utf-8"
         run: |
           chcp 65001 | Out-Null
           [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false
