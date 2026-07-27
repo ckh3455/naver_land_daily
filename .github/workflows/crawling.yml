@@ -1,8 +1,9 @@
-name: 네이버 부동산 크롤링 및 데이터 정리 (Windows Self-hosted)
+name: 네이버 부동산 크롤링 및 데이터 정리 (부팅 후 자동 실행)
 
 on:
   schedule:
-    # 매일 오전 3시 (한국 시간) = UTC 18시
+    # 한국 시간 오전 3시에 작업을 대기열에 등록합니다.
+    # PC가 꺼져 있으면 최대 24시간 대기하며, 부팅 후 Runner가 연결되는 즉시 실행됩니다.
     - cron: "0 18 * * *"
   workflow_dispatch:
 
