@@ -1,0 +1,108 @@
+name: 네이버 크롤링 단일 시도
+
+on:
+  workflow_call:
+    inputs:
+      attempt_name:
+        description: 아티팩트를 구분할 시도 이름
+        required: true
+        type: string
+    secrets:
+      SERVICE_ACCOUNT_JSON:
+        required: true
+      SPREADSHEET_ID:
+        required: true
+    outputs:
+      success:
+        description: 크롤링과 시트 반영 성공 여부
+        value: ${{ jobs.crawl.outputs.success }}
+
+jobs:
+  crawl:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    outputs:
+      success: ${{ steps.result.outputs.success }}
+
+    env:
+      SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: "utf-8"
+      MIN_SUCCESSFUL_COMPLEXES: "23"
+      MIN_TOTAL_PROPERTIES: "100"
+
+    steps:
+      - name: 코드 체크아웃
+        uses: actions/checkout@v4
+
+      - name: Python 3.11 설정
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Python 의존성 설치
+        run: pip install -r requirements.txt
+
+      - name: Chromium 캐시
+        id: playwright-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
+
+      - name: Chromium 설치
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        run: python -m playwright install chromium
+
+      - name: Chromium 시스템 의존성 확인
+        run: python -m playwright install-deps chromium
+
+      - name: 서비스 계정 키 생성
+        env:
+          SERVICE_ACCOUNT_JSON: ${{ secrets.SERVICE_ACCOUNT_JSON }}
+        shell: bash
+        run: |
+          if [[ -z "$SERVICE_ACCOUNT_JSON" ]]; then
+            echo "SERVICE_ACCOUNT_JSON secret이 비어있습니다."
+            exit 1
+          fi
+          printf '%s' "$SERVICE_ACCOUNT_JSON" > service_account.json
+
+      - name: 네이버 접속 사전검사
+        id: preflight
+        continue-on-error: true
+        run: python naver_access_probe.py
+
+      - name: 크롤링 및 데이터 정리
+        id: crawler
+        if: steps.preflight.outcome == 'success'
+        continue-on-error: true
+        run: python main_github.py
+
+      - name: 결과 기록
+        id: result
+        if: always()
+        shell: bash
+        run: |
+          if [[ "${{ steps.preflight.outcome }}" == "success" &&
+                "${{ steps.crawler.outcome }}" == "success" ]]; then
+            echo "success=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "success=0" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 실행 결과 업로드
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: naver-crawling-${{ github.run_id }}-${{ inputs.attempt_name }}
+          path: |
+            crawling_results.json
+            debug/**
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: 서비스 계정 키 삭제
+        if: always()
+        run: rm -f service_account.json
