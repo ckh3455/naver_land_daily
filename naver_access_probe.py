@@ -3,18 +3,77 @@
 
 import asyncio
 import json
+import urllib.parse
+import urllib.request
 from pathlib import Path
 
 from playwright.async_api import async_playwright
 
 
 TEST_URL = "https://new.land.naver.com/complexes/728"
+API_URL = "https://new.land.naver.com/api/articles/complex/728"
 DEBUG_DIR = Path("debug")
+
+
+def probe_direct_api(result):
+    params = urllib.parse.urlencode(
+        {
+            "realEstateType": "APT",
+            "tradeType": "",
+            "page": "1",
+            "complexNo": "728",
+            "sameAddressGroup": "false",
+            "showArticle": "false",
+            "priceType": "RETAIL",
+            "type": "list",
+            "order": "rank",
+        }
+    )
+    request = urllib.request.Request(
+        f"{API_URL}?{params}",
+        headers={
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            ),
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "ko-KR,ko;q=0.9",
+            "Referer": TEST_URL,
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            data = json.loads(response.read().decode("utf-8"))
+        count = len(data.get("articleList", []))
+        result["direct_api"] = {
+            "ok": count > 0,
+            "status": response.status,
+            "article_count": count,
+            "is_more_data": bool(data.get("isMoreData")),
+        }
+        return count > 0
+    except Exception as exc:
+        result["direct_api"] = {
+            "ok": False,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+        return False
 
 
 async def main():
     DEBUG_DIR.mkdir(exist_ok=True)
     result = {"ok": False, "url": TEST_URL, "article_count": 0}
+
+    if await asyncio.to_thread(probe_direct_api, result):
+        result["ok"] = True
+        result["method"] = "direct_api"
+        (DEBUG_DIR / "naver_access_probe.json").write_text(
+            json.dumps(result, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        print(json.dumps(result, ensure_ascii=False))
+        return 0
 
     async with async_playwright() as playwright:
         browser = await playwright.chromium.launch(headless=True)
@@ -58,6 +117,7 @@ async def main():
                     except asyncio.TimeoutError:
                         pass
             result["ok"] = result["article_count"] > 0
+            result["method"] = "browser_page"
             result["title"] = await page.title()
         except Exception as exc:
             result["error"] = f"{type(exc).__name__}: {exc}"
