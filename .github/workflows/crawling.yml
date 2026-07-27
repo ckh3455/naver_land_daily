@@ -1,6 +1,14 @@
 name: 네이버 부동산 크롤링 및 데이터 정리
 
 on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "main_github.py"
+      - "naver_access_probe.py"
+      - "requirements.txt"
+      - ".github/workflows/crawling.yml"
+      - ".github/workflows/naver-attempt.yml"
   schedule:
     # 매일 오전 3시 (한국 시간) = UTC 18시
     - cron: "0 18 * * *"
