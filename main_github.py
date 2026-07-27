@@ -863,6 +863,396 @@ def get_brokerage_counts(final_rows):
             cnt[name] = cnt.get(name, 0) + 1
     return cnt
 
+
+SALES_LIST_SHEET_NAME = "매매물건 목록"
+SALES_LIST_COL_COUNT = 25
+FEATURES_COLUMN_INDEX = 14  # O열: 특징
+CHECK_REQUIRED_TEXT = "확인요망"
+CHECK_REQUIRED_BLUE = {"red": 0.0, "green": 0.35, "blue": 0.80}
+
+
+def _number_from_text(value):
+    text = normalize(value).replace(",", "")
+    match = re.search(r"-?\d+(?:\.\d+)?", text)
+    return float(match.group(0)) if match else None
+
+
+def _normalize_complex_key(value):
+    return re.sub(r"[\s,·.]", "", normalize(value)).replace("아파트", "")
+
+
+def _normalize_dong_key(value):
+    text = normalize(value)
+    match = re.search(r"\d+", text)
+    return str(int(match.group(0))) if match else text
+
+
+def _area_to_pyeong(area_value):
+    """네이버 공급면적(첫 번째 ㎡ 값)을 매물장의 '00평' 형식으로 변환."""
+    area_m2 = _number_from_text(area_value)
+    if area_m2 is None or area_m2 <= 0:
+        return ""
+    return f"{int(round(area_m2 / 3.305785))}평"
+
+
+def _floor_parts(value):
+    """
+    네이버 floorInfo를 매물장용 층 표시와 층대(저/중/고)로 변환.
+    예: 7/15 -> ('7층(네이버)', '중', 7)
+    """
+    text = normalize(value)
+    numbers = [int(x) for x in re.findall(r"\d+", text)]
+    current = numbers[0] if numbers else None
+    total = numbers[1] if len(numbers) >= 2 and numbers[1] > 0 else None
+
+    if "저" in text:
+        band = "저"
+    elif "중" in text:
+        band = "중"
+    elif "고" in text:
+        band = "고"
+    elif current is not None and total:
+        ratio = current / total
+        band = "저" if ratio <= 0.33 else ("중" if ratio <= 0.66 else "고")
+    else:
+        band = ""
+
+    floor_cell = f"{current}층(네이버)" if current is not None else f"{text}(네이버)"
+    return floor_cell, band, current
+
+
+def _price_key(value):
+    """매매가격 문자열에서 억 단위 비교값을 만든다."""
+    text = normalize(value).replace(",", "")
+    if not text:
+        return None
+    if "억" in text:
+        left, right = text.split("억", 1)
+        base = _number_from_text(left)
+        extra = _number_from_text(right)
+        if base is not None:
+            return round(base + ((extra or 0) / 10000), 4)
+    number = _number_from_text(text)
+    if number is None:
+        return None
+    # 네이버가 만원 단위 정수로 주는 경우(예: 560000)도 억 단위로 맞춘다.
+    return round(number / 10000, 4) if number >= 1000 else round(number, 4)
+
+
+def _listing_floor_number(value):
+    """매물장 '층/호' 값에서 비교용 층수를 얻는다(예: 1304호 -> 13층)."""
+    text = normalize(value)
+    number = _number_from_text(text)
+    if number is None:
+        return None
+    if "층" in text:
+        return int(number)
+    if float(number).is_integer() and number >= 100:
+        return int(number) // 100
+    return int(number)
+
+
+def _existing_listing_matches(existing_rows, candidate):
+    candidate_complex = _normalize_complex_key(candidate["단지명"])
+    candidate_pyeong = _number_from_text(candidate["평형"])
+    candidate_dong = _normalize_dong_key(candidate["동"])
+    candidate_price = _price_key(candidate["가격"])
+
+    for row in existing_rows[1:]:
+        if len(row) < 9:
+            continue
+        if _normalize_complex_key(row[2] if len(row) > 2 else "") != candidate_complex:
+            continue
+        if _number_from_text(row[3] if len(row) > 3 else "") != candidate_pyeong:
+            continue
+        if _normalize_dong_key(row[5] if len(row) > 5 else "") != candidate_dong:
+            continue
+        if _price_key(row[8] if len(row) > 8 else "") != candidate_price:
+            continue
+
+        existing_floor = normalize(row[6] if len(row) > 6 else "")
+        existing_band = normalize(row[7] if len(row) > 7 else "")
+        existing_floor_no = _listing_floor_number(existing_floor)
+        candidate_floor_no = candidate.get("층번호")
+
+        # 정확한 층이 같거나, 정확한 층을 알 수 없을 때 층대가 같으면 기존 물건으로 본다.
+        if candidate_floor_no is not None and existing_floor_no == candidate_floor_no:
+            return True
+        if candidate.get("층대") and existing_band == candidate["층대"]:
+            return True
+        if not candidate.get("층대") and not existing_band:
+            return True
+    return False
+
+
+def _row_sort_number(value, default=999999):
+    number = _number_from_text(value)
+    return number if number is not None else default
+
+
+def _find_sales_insert_index(rows, candidate):
+    """
+    기존 사용자 정렬 순서를 최대한 보존한다.
+    같은 단지/평형/동 그룹 안에서는 층 순서로, 그룹이 없으면 가장 가까운
+    단지/평형/구역 그룹의 마지막 다음 위치에 삽입한다.
+    반환값은 Sheets API의 0-based 행 인덱스이자 rows 리스트 삽입 인덱스다.
+    """
+    zone = normalize(candidate["구역"])
+    complex_key = _normalize_complex_key(candidate["단지명"])
+    pyeong_no = _number_from_text(candidate["평형"])
+    dong_key = _normalize_dong_key(candidate["동"])
+    floor_no = candidate.get("층번호")
+
+    exact_group = []
+    pyeong_group = []
+    complex_group = []
+    zone_group = []
+
+    for idx, row in enumerate(rows[1:], start=1):
+        row_zone = normalize(row[1] if len(row) > 1 else "")
+        row_complex = _normalize_complex_key(row[2] if len(row) > 2 else "")
+        row_pyeong = _number_from_text(row[3] if len(row) > 3 else "")
+        row_dong = _normalize_dong_key(row[5] if len(row) > 5 else "")
+
+        if row_zone == zone:
+            zone_group.append(idx)
+        if row_complex == complex_key:
+            complex_group.append(idx)
+            if row_pyeong == pyeong_no:
+                pyeong_group.append(idx)
+                if row_dong == dong_key:
+                    exact_group.append(idx)
+
+    if exact_group:
+        target_floor = floor_no if floor_no is not None else 999999
+        for idx in exact_group:
+            row_floor = _listing_floor_number(rows[idx][6] if len(rows[idx]) > 6 else "")
+            row_floor = row_floor if row_floor is not None else 999999
+            if target_floor < row_floor:
+                return idx
+        return exact_group[-1] + 1
+
+    if pyeong_group:
+        target_dong = _row_sort_number(candidate["동"])
+        for idx in pyeong_group:
+            row_dong = _row_sort_number(rows[idx][5] if len(rows[idx]) > 5 else "")
+            if target_dong < row_dong:
+                return idx
+        return pyeong_group[-1] + 1
+
+    if complex_group:
+        target_pyeong = pyeong_no if pyeong_no is not None else 999999
+        for idx in complex_group:
+            row_pyeong = _row_sort_number(rows[idx][3] if len(rows[idx]) > 3 else "")
+            if target_pyeong < row_pyeong:
+                return idx
+        return complex_group[-1] + 1
+
+    if zone_group:
+        return zone_group[-1] + 1
+    return len(rows)
+
+
+def _build_check_required_candidates(final_data_infos, brokerage_counts, alias, sales_rows):
+    known_canon = alias.get("knownCanonNames", alias.get("validCanonNames", set()))
+    # 매물장에 실제 존재하는 단지만 자동삽입 대상으로 제한한다.
+    complex_to_zone = {}
+    for row in sales_rows[1:]:
+        if len(row) > 3:
+            ckey = _normalize_complex_key(row[2])
+            if ckey and ckey not in complex_to_zone:
+                complex_to_zone[ckey] = normalize(row[1] if len(row) > 1 else "")
+
+    candidates = []
+    seen_keys = set()
+    for info in final_data_infos:
+        row = info["행"]
+        if len(row) <= COL_중개업소 or normalize(row[COL_거래구분]) != "매매":
+            continue
+
+        complex_name = normalize(row[COL_단지명])
+        if complex_name in EXCLUDED_COMPLEXES:
+            continue
+        complex_key = _normalize_complex_key(complex_name)
+        zone = complex_to_zone.get(complex_key)
+        if not zone:
+            continue
+
+        names = [normalize(x) for x in str(row[COL_중개업소] or "").split(",") if normalize(x)]
+        low_frequency = [n for n in names if brokerage_counts.get(n, 0) <= LOW_FREQUENCY_THRESHOLD]
+        external = [n for n in names if n not in known_canon]
+        multiple = len(names) >= 2
+
+        reasons = []
+        if multiple:
+            reasons.append(f"여러 업소 중복광고({len(names)}곳)")
+        if low_frequency:
+            reasons.append("저빈도 업소: " + ", ".join(low_frequency))
+        if external:
+            reasons.append("외부 업소: " + ", ".join(external))
+        if not reasons:
+            continue
+
+        pyeong = _area_to_pyeong(row[COL_면적] if len(row) > COL_면적 else "")
+        if not pyeong:
+            continue
+        floor_cell, floor_band, floor_no = _floor_parts(row[COL_층수] if len(row) > COL_층수 else "")
+        candidate = {
+            "구역": zone,
+            "단지명": complex_name,
+            "평형": pyeong,
+            "동": normalize(row[COL_동] if len(row) > COL_동 else ""),
+            "층/호": floor_cell,
+            "층대": floor_band,
+            "층번호": floor_no,
+            "가격": normalize(row[COL_가격] if len(row) > COL_가격 else ""),
+            "중개업소": ", ".join(names),
+            "등록일": normalize(row[COL_등록일자] if len(row) > COL_등록일자 else ""),
+            "매물번호": normalize(row[COL_매물번호] if len(row) > COL_매물번호 else ""),
+            "사유": " / ".join(reasons)
+        }
+        dedupe_key = (
+            complex_key, _number_from_text(pyeong), _normalize_dong_key(candidate["동"]),
+            floor_band, floor_no, _price_key(candidate["가격"])
+        )
+        if dedupe_key in seen_keys or _existing_listing_matches(sales_rows, candidate):
+            continue
+        seen_keys.add(dedupe_key)
+        candidates.append(candidate)
+    return candidates
+
+
+def insert_check_required_sales_listings(
+    sheet_service, sales_spreadsheet_id, final_data_infos, brokerage_counts, alias
+):
+    """선별된 네이버 매물을 매매물건 목록의 기존 정렬 위치에 중복 없이 삽입."""
+    metadata = sheet_service.spreadsheets().get(
+        spreadsheetId=sales_spreadsheet_id
+    ).execute()
+    sales_sheet_id = None
+    for sheet in metadata.get("sheets", []):
+        props = sheet.get("properties", {})
+        if props.get("title") == SALES_LIST_SHEET_NAME:
+            sales_sheet_id = props.get("sheetId")
+            break
+    if sales_sheet_id is None:
+        print(f"'{SALES_LIST_SHEET_NAME}' 시트를 찾지 못해 확인요망 자동삽입을 생략합니다.")
+        return 0
+
+    response = sheet_service.spreadsheets().values().get(
+        spreadsheetId=sales_spreadsheet_id,
+        range=f"'{SALES_LIST_SHEET_NAME}'!A:Y"
+    ).execute()
+    sales_rows = response.get("values", [])
+    if not sales_rows:
+        print("매매물건 목록이 비어 있어 확인요망 자동삽입을 생략합니다.")
+        return 0
+
+    candidates = _build_check_required_candidates(
+        final_data_infos, brokerage_counts, alias, sales_rows
+    )
+    print(f"매매물건 목록 확인요망 신규 후보: {len(candidates)}건")
+
+    inserted = 0
+    today = datetime.now().strftime("%y.%m.%d")
+    for candidate in candidates:
+        # 앞선 후보 삽입으로 바뀐 가상 행 목록을 기준으로 매번 위치를 다시 계산한다.
+        insert_index = _find_sales_insert_index(sales_rows, candidate)
+        source_index = max(1, insert_index - 1)
+
+        values = [""] * SALES_LIST_COL_COUNT
+        pyeong_no = int(_number_from_text(candidate["평형"]) or 0)
+        values[0] = f"{(pyeong_no // 10) * 10}평형대" if pyeong_no else ""
+        values[1] = candidate["구역"]
+        values[2] = candidate["단지명"]
+        values[3] = candidate["평형"]
+        values[5] = candidate["동"]
+        values[6] = candidate["층/호"]
+        values[7] = candidate["층대"]
+        values[8] = candidate["가격"]
+        values[9] = today
+        values[10] = candidate["등록일"] or today
+        values[11] = candidate["중개업소"]
+        values[12] = (
+            f"[네이버 자동확인] {candidate['사유']}"
+            + (f" / 매물번호 {candidate['매물번호']}" if candidate["매물번호"] else "")
+        )
+        values[14] = CHECK_REQUIRED_TEXT
+        values[15] = "확인"
+
+        requests = [{
+            "insertDimension": {
+                "range": {
+                    "sheetId": sales_sheet_id,
+                    "dimension": "ROWS",
+                    "startIndex": insert_index,
+                    "endIndex": insert_index + 1
+                },
+                "inheritFromBefore": insert_index > 1
+            }
+        }]
+
+        # 인접한 기존 행의 서식/유효성 검사를 복사하되 값은 복사하지 않는다.
+        requests.append({
+            "copyPaste": {
+                "source": {
+                    "sheetId": sales_sheet_id,
+                    "startRowIndex": source_index,
+                    "endRowIndex": source_index + 1,
+                    "startColumnIndex": 0,
+                    "endColumnIndex": SALES_LIST_COL_COUNT
+                },
+                "destination": {
+                    "sheetId": sales_sheet_id,
+                    "startRowIndex": insert_index,
+                    "endRowIndex": insert_index + 1,
+                    "startColumnIndex": 0,
+                    "endColumnIndex": SALES_LIST_COL_COUNT
+                },
+                "pasteType": "PASTE_FORMAT",
+                "pasteOrientation": "NORMAL"
+            }
+        })
+        requests.append({
+            "repeatCell": {
+                "range": {
+                    "sheetId": sales_sheet_id,
+                    "startRowIndex": insert_index,
+                    "endRowIndex": insert_index + 1,
+                    "startColumnIndex": FEATURES_COLUMN_INDEX,
+                    "endColumnIndex": FEATURES_COLUMN_INDEX + 1
+                },
+                "cell": {
+                    "userEnteredFormat": {
+                        "textFormat": {
+                            "bold": True,
+                            "foregroundColor": CHECK_REQUIRED_BLUE
+                        }
+                    }
+                },
+                "fields": "userEnteredFormat.textFormat.bold,userEnteredFormat.textFormat.foregroundColor"
+            }
+        })
+        sheet_service.spreadsheets().batchUpdate(
+            spreadsheetId=sales_spreadsheet_id,
+            body={"requests": requests}
+        ).execute()
+        sheet_service.spreadsheets().values().update(
+            spreadsheetId=sales_spreadsheet_id,
+            range=f"'{SALES_LIST_SHEET_NAME}'!A{insert_index + 1}:Y{insert_index + 1}",
+            valueInputOption="USER_ENTERED",
+            body={"values": [values]}
+        ).execute()
+
+        sales_rows.insert(insert_index, values)
+        inserted += 1
+        print(
+            f"[확인요망 추가] {candidate['단지명']} {candidate['평형']} "
+            f"{candidate['동']} {candidate['층/호']} {candidate['가격']}"
+        )
+    return inserted
+
+
 # ==========================================================
 # ✅ (통합) 테스트버전 성공 로직: 안정형 RichText + 행단위 repeatCell + chunk batchUpdate
 # ==========================================================
@@ -1099,18 +1489,19 @@ def process_real_estate_data(spreadsheet, worksheet, sheet_service, spreadsheet_
             spreadsheetId=spreadsheet_id
         ).execute()
 
-        main_sheet = None
+        main_sheet = worksheet.title
         main_sheet_id = None
         for sheet in sheet_metadata.get('sheets', []):
             props = sheet['properties']
-            if props.get('sheetId') == 103445093:
-                main_sheet = props['title']
+            if props.get('title') == main_sheet:
                 main_sheet_id = props['sheetId']
                 break
 
-        if not main_sheet:
-            main_sheet = sheet_metadata['sheets'][0]['properties']['title']
-            main_sheet_id = sheet_metadata['sheets'][0]['properties']['sheetId']
+        if main_sheet_id is None:
+            raise RuntimeError(
+                f"대상 시트 '{main_sheet}'의 sheetId를 찾을 수 없습니다. "
+                "첫 번째 시트로 대체하지 않고 안전하게 중단합니다."
+            )
 
         print(f"시트명: {main_sheet}, Sheet ID: {main_sheet_id}")
 
@@ -1198,6 +1589,16 @@ def process_real_estate_data(spreadsheet, worksheet, sheet_service, spreadsheet_
             sheet_service, spreadsheet_id, main_sheet_id,
             final_data_infos, header_row, col_count, brokerage_counts, alias
         )
+
+        sales_spreadsheet_id = os.environ.get(
+            "SALES_SPREADSHEET_ID",
+            "1QP56lm5kPBdsUhrgcgY2U-JdmukXIkKCSxefd1QExKE"
+        )
+        inserted_count = insert_check_required_sales_listings(
+            sheet_service, sales_spreadsheet_id,
+            final_data_infos, brokerage_counts, alias
+        )
+        print(f"매매물건 목록 확인요망 자동삽입: {inserted_count}건")
 
         print("=== 부동산데이터처리 완료 ===")
         print(f"총 매물: {len(final_data_rows)}개")
