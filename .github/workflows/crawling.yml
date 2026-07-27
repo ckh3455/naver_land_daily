@@ -21,6 +21,7 @@ jobs:
 
     env:
       SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
+      SALES_SPREADSHEET_ID: "1QP56lm5kPBdsUhrgcgY2U-JdmukXIkKCSxefd1QExKE"
       PYTHONUTF8: "1"
       PYTHONIOENCODING: "utf-8"
       MIN_SUCCESSFUL_COMPLEXES: "23"
