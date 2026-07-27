@@ -364,7 +364,7 @@ class AggressiveCardScroll:
             # ✅ 기존 page.goto를 재시도 버전으로만 교체 (나머지 로직 유지)
             await self._goto_with_retry(self.base_url, wait_until='domcontentloaded', timeout=60000, attempts=5)
 
-            await asyncio.sleep(3)
+            await asyncio.sleep(1.5)
             debug_log("상세매물검색 버튼 클릭 시도...", "DEBUG")
             try:
                 clicked = await self.page.evaluate("""
@@ -380,7 +380,7 @@ class AggressiveCardScroll:
                 """)
                 if clicked:
                     debug_log("✅ 상세매물검색 버튼 클릭 성공", "SUCCESS")
-                    await asyncio.sleep(2)
+                    await asyncio.sleep(1)
                 else:
                     debug_log("⚠️ 상세매물검색 버튼을 찾지 못함 (이미 활성화 상태일 수 있음)", "WARNING")
             except Exception as e:
@@ -388,7 +388,7 @@ class AggressiveCardScroll:
             try:
                 await self.page.wait_for_response(
                     lambda r: 'api/articles/complex' in r.url,
-                    timeout=5000
+                    timeout=2500
                 )
             except:
                 pass
@@ -402,6 +402,7 @@ class AggressiveCardScroll:
         no_height_change_count = 0
         MAX_NO_CHANGE = 3
         scroll_attempts = 0
+        no_new_data_count = 0
         while self.more_data:
             prev_count = len(self.property_cards)
             try:
@@ -432,8 +433,8 @@ class AggressiveCardScroll:
                             debug_log("⏹️ isMoreData=False + 높이 변화 없음 → 종료", "INFO")
                             break
                         else:
-                            debug_log("⚠️ 높이 변화 없지만 isMoreData=True → 10초 추가 대기", "WARNING")
-                            await asyncio.sleep(10)
+                            debug_log("⚠️ 높이 변화 없지만 isMoreData=True → 3초 추가 대기", "WARNING")
+                            await asyncio.sleep(3)
                             no_height_change_count = 0
                 else:
                     no_height_change_count = 0
@@ -464,20 +465,26 @@ class AggressiveCardScroll:
                 try:
                     await self.page.wait_for_response(
                         lambda r: 'api/articles/complex' in r.url and 'page=' in r.url,
-                        timeout=3000
+                        timeout=1500
                     )
                     debug_log("📡 API 응답 감지!", "SUCCESS")
                 except:
                     pass
 
-                await asyncio.sleep(1.5)
+                await asyncio.sleep(0.5)
 
                 if len(self.property_cards) > prev_count:
                     new_count = len(self.property_cards) - prev_count
+                    no_new_data_count = 0
                     debug_log(f"🎉 새 매물 {new_count}개 추가! (총 {len(self.property_cards)}개)", "SUCCESS")
+                else:
+                    no_new_data_count += 1
+                    if no_new_data_count >= 6:
+                        debug_log("⏹️ 6회 연속 새 매물이 없어 스크롤 종료", "INFO")
+                        break
 
-                if scroll_attempts >= 150:
-                    debug_log(f"⛔ 안전중단: 150회 스크롤 시도 초과 (총 {len(self.property_cards)}개 수집)", "WARNING")
+                if scroll_attempts >= 100:
+                    debug_log(f"⛔ 안전중단: 100회 스크롤 시도 초과 (총 {len(self.property_cards)}개 수집)", "WARNING")
                     break
 
             except Exception as e:
@@ -1212,11 +1219,10 @@ async def main():
     print("="*70 + "\n")
 
     # 1) 구글 시트 연결
-    debug_log("=== 1단계: 구글 시트 연결 및 초기화 ===", "STEP")
+    debug_log("=== 1단계: 구글 시트 연결 ===", "STEP")
     worksheet, spreadsheet = setup_google_sheets()
     if not worksheet:
-        debug_log("구글 시트 연결 실패. 프로그램 종료", "ERROR")
-        return
+        raise RuntimeError("구글 시트 연결 실패")
 
     # Google Sheets API 서비스 생성 (데이터 정리용)
     credentials_file = 'service_account.json'
@@ -1227,10 +1233,6 @@ async def main():
     sheet_service = build('sheets', 'v4', credentials=credentials)
     spreadsheet_id = os.environ.get('SPREADSHEET_ID', '1QP56lm5kPBdsUhrgcgY2U-JdmukXIkKCSxefd1QExKE')
 
-    debug_log("기존 데이터 삭제 중...", "DEBUG")
-    worksheet.clear()
-    debug_log("기존 데이터 삭제 완료", "SUCCESS")
-
     headers = [
         "단지명", "거래구분", "동", "층수", "면적", "가격",
         "가격변동", "중복업소",
@@ -1240,13 +1242,10 @@ async def main():
         "사진 유무", "경도", "위도", "매물번호",
         "인증광고"
     ]
-    debug_log(f"헤더 추가 중 (총 {len(headers)}개 열)", "DEBUG")
-    worksheet.append_row(headers)
-    debug_log("헤더 추가 완료", "SUCCESS")
-
     # 2) 크롤링
     debug_log("=== 2단계: 크롤링 실행 ===", "STEP")
     results = []
+    all_rows = []
     total_start_time = time.time()
 
     for idx, complex_info in enumerate(COMPLEXES, 1):
@@ -1259,13 +1258,13 @@ async def main():
         result = await crawler.run()
         complex_duration = time.time() - complex_start_time
 
-        if 'error' in result:
+        if 'error' in result or result.get('property_count', 0) <= 0:
             results.append({
                 'complex_name': complex_info['name'],
                 'property_count': 0,
                 'duration_seconds': complex_duration,
                 'status': 'error',
-                'error': result.get('error')
+                'error': result.get('error', '수집 매물 0건')
             })
         else:
             property_count = result['property_count']
@@ -1275,9 +1274,8 @@ async def main():
                     formatted_row = format_property_data(prop)
                     if len(formatted_row) == len(headers):
                         rows_to_append.append(formatted_row)
-            if rows_to_append:
-                worksheet.append_rows(rows_to_append)
-                debug_log(f"✅ {complex_info['name']} 매물 {len(rows_to_append)}개 시트 기록 완료", "SUCCESS")
+            all_rows.extend(rows_to_append)
+            debug_log(f"✅ {complex_info['name']} 매물 {len(rows_to_append)}개 임시 저장 완료", "SUCCESS")
 
             results.append({
                 'complex_name': complex_info['name'],
@@ -1287,21 +1285,52 @@ async def main():
             })
 
         if idx < len(COMPLEXES):
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.2)
 
-    # 3) 데이터 정리
-    debug_log("\n=== 3단계: 데이터 정리 실행 ===", "STEP")
+    # 3) 결과 검증 후에만 시트 교체
+    successful_count = sum(1 for r in results if r['status'] == 'success')
+    min_successful = int(os.getenv('MIN_SUCCESSFUL_COMPLEXES', str(len(COMPLEXES) - 2)))
+    min_total = int(os.getenv('MIN_TOTAL_PROPERTIES', '100'))
+    total_properties = sum(r['property_count'] for r in results)
+
+    result_data = {
+        'total_duration_seconds': time.time() - total_start_time,
+        'start_time': datetime.fromtimestamp(total_start_time).strftime('%Y-%m-%d %H:%M:%S'),
+        'successful_complexes': successful_count,
+        'total_complexes': len(COMPLEXES),
+        'total_properties': total_properties,
+        'results': results
+    }
+    with open('crawling_results.json', 'w', encoding='utf-8') as f:
+        json.dump(result_data, f, ensure_ascii=False, indent=2)
+
+    if successful_count < min_successful or total_properties < min_total:
+        raise RuntimeError(
+            f"수집 검증 실패: 성공 단지 {successful_count}/{len(COMPLEXES)} "
+            f"(최소 {min_successful}), 매물 {total_properties}건 (최소 {min_total})"
+        )
+
+    debug_log("수집 검증 통과. 기존 시트를 교체합니다.", "SUCCESS")
+    worksheet.clear()
+    worksheet.append_row(headers)
+    # API 요청 수를 줄이기 위해 단지별 쓰기 대신 최대 500행씩 일괄 기록
+    for start in range(0, len(all_rows), 500):
+        worksheet.append_rows(all_rows[start:start + 500], value_input_option='RAW')
+    debug_log(f"✅ 구글 시트 원본 {len(all_rows)}행 기록 완료", "SUCCESS")
+
+    # 4) 데이터 정리
+    debug_log("\n=== 4단계: 데이터 정리 실행 ===", "STEP")
     try:
         process_real_estate_data(spreadsheet, worksheet, sheet_service, spreadsheet_id)
         debug_log("✅ 데이터 정리 완료", "SUCCESS")
     except Exception as e:
         debug_log(f"❌ 데이터 정리 실패: {str(e)}", "ERROR")
         debug_log(f"상세 에러:\n{traceback.format_exc()}", "DEBUG")
+        raise
 
-    # 4) 결과 요약
+    # 5) 결과 요약
     total_end_time = time.time()
     total_duration = total_end_time - total_start_time
-    total_properties = sum(r['property_count'] for r in results)
 
     print("\n" + "="*70)
     print("📊 전체 결과 요약")
@@ -1311,12 +1340,8 @@ async def main():
     print(f"🏠 총 매물 수: {total_properties}개")
     print("="*70)
 
-    result_data = {
-        'total_duration_seconds': total_duration,
-        'start_time': datetime.fromtimestamp(total_start_time).strftime('%Y-%m-%d %H:%M:%S'),
-        'total_properties': total_properties,
-        'results': [{k: v for k, v in r.items() if k != 'properties'} for r in results]
-    }
+    result_data['total_duration_seconds'] = total_duration
+    result_data['published_to_sheet'] = True
 
     with open('crawling_results.json', 'w', encoding='utf-8') as f:
         json.dump(result_data, f, ensure_ascii=False, indent=2)
