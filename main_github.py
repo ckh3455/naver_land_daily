@@ -1178,7 +1178,6 @@ def insert_check_required_sales_listings(
             + (f" / 매물번호 {candidate['매물번호']}" if candidate["매물번호"] else "")
         )
         values[14] = CHECK_REQUIRED_TEXT
-        values[15] = "확인"
 
         requests = [{
             "insertDimension": {
