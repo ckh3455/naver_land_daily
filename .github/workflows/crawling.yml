@@ -1,14 +1,6 @@
-name: 네이버 부동산 크롤링 및 데이터 정리
+name: 네이버 부동산 크롤링 및 데이터 정리 (Windows Self-hosted)
 
 on:
-  pull_request:
-    branches: [main]
-    paths:
-      - "main_github.py"
-      - "naver_access_probe.py"
-      - "requirements.txt"
-      - ".github/workflows/crawling.yml"
-      - ".github/workflows/naver-attempt.yml"
   schedule:
     # 매일 오전 3시 (한국 시간) = UTC 18시
     - cron: "0 18 * * *"
@@ -19,48 +11,84 @@ permissions:
 
 concurrency:
   group: naver-land-daily
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
-  attempt1:
-    name: Attempt 1
-    uses: ./.github/workflows/naver-attempt.yml
-    with:
-      attempt_name: attempt1
-    secrets: inherit
+  crawl-and-process:
+    runs-on: [self-hosted, windows]
+    timeout-minutes: 60
 
-  attempt2:
-    name: Attempt 2
-    needs: attempt1
-    if: always() && needs.attempt1.outputs.success != '1'
-    uses: ./.github/workflows/naver-attempt.yml
-    with:
-      attempt_name: attempt2
-    secrets: inherit
+    env:
+      SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: "utf-8"
+      MIN_SUCCESSFUL_COMPLEXES: "23"
+      MIN_TOTAL_PROPERTIES: "100"
 
-  attempt3:
-    name: Attempt 3
-    needs: [attempt1, attempt2]
-    if: always() && needs.attempt1.outputs.success != '1' && needs.attempt2.outputs.success != '1'
-    uses: ./.github/workflows/naver-attempt.yml
-    with:
-      attempt_name: attempt3
-    secrets: inherit
-
-  final-status:
-    name: 최종 결과
-    if: always()
-    needs: [attempt1, attempt2, attempt3]
-    runs-on: ubuntu-latest
     steps:
-      - name: 성공 여부 확인
-        shell: bash
+      - name: 코드 체크아웃
+        uses: actions/checkout@v4
+
+      - name: Python 환경 확인
+        shell: powershell
         run: |
-          if [[ "${{ needs.attempt1.outputs.success }}" == "1" ||
-                "${{ needs.attempt2.outputs.success }}" == "1" ||
-                "${{ needs.attempt3.outputs.success }}" == "1" ]]; then
-            echo "네이버 부동산 크롤링 성공"
-            exit 0
-          fi
-          echo "3개의 GitHub Runner에서 모두 실패했습니다."
-          exit 1
+          if (!(Test-Path "C:\Python311\python.exe")) {
+            Write-Error "C:\Python311\python.exe를 찾을 수 없습니다."
+            exit 1
+          }
+          & "C:\Python311\python.exe" --version
+
+      - name: 필요한 Python 패키지만 설치
+        shell: powershell
+        run: |
+          & "C:\Python311\python.exe" -c "import playwright, gspread, googleapiclient"
+          if ($LASTEXITCODE -ne 0) {
+            & "C:\Python311\python.exe" -m pip install -r requirements.txt
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          } else {
+            Write-Host "필수 패키지가 이미 설치되어 있어 설치를 생략합니다."
+          }
+
+      - name: Chromium 확인
+        shell: powershell
+        run: |
+          & "C:\Python311\python.exe" -m playwright install chromium
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: 서비스 계정 키 생성
+        shell: powershell
+        env:
+          SERVICE_ACCOUNT_JSON: ${{ secrets.SERVICE_ACCOUNT_JSON }}
+        run: |
+          $json = $env:SERVICE_ACCOUNT_JSON
+          if ([string]::IsNullOrWhiteSpace($json)) {
+            Write-Error "SERVICE_ACCOUNT_JSON secret이 비어있습니다."
+            exit 1
+          }
+          $json = $json -replace "^\uFEFF", ""
+          $json = $json -replace "\uFEFF", ""
+          [System.IO.File]::WriteAllText(
+            "service_account.json",
+            $json,
+            (New-Object System.Text.UTF8Encoding($false))
+          )
+
+      - name: 크롤링 및 데이터 정리
+        shell: powershell
+        run: |
+          & "C:\Python311\python.exe" main_github.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: 실행 결과 업로드
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: crawling-results-${{ github.run_number }}
+          path: crawling_results.json
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: 서비스 계정 키 삭제
+        if: always()
+        shell: powershell
+        run: Remove-Item -Force service_account.json -ErrorAction SilentlyContinue
