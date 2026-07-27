@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Playwright and local secrets
+.playwright/
+service_account.json
+.env
+.env.*
+
+# Generated output
+crawling_results.json
+debug/
+*.xlsx
+*.csv
+*.log
+
+# Editors and OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

@@ -1,13 +1,14 @@
 # 🏢 네이버 부동산 크롤러 (GitHub Actions)
 
-매일 자동으로 23개 아파트 단지의 매물 정보를 수집하여 Google Sheets에 기록하는 크롤러입니다.
+매일 자동으로 25개 아파트 단지의 매물 정보를 수집하여 Google Sheets에 기록하는 크롤러입니다.
 
 ## 📋 기능
 
-- 🤖 **자동 스케줄링**: 매일 오전 9시(한국 시간) 자동 실행
+- 🤖 **자동 스케줄링**: 매일 오전 3시(한국 시간) 자동 실행
+- 🖥️ **Windows Runner**: 국내 인터넷 회선의 self-hosted Runner에서 안정적으로 실행
 - 🖱️ **수동 실행**: GitHub Actions 페이지에서 버튼 클릭으로 즉시 실행
 - 📊 **Google Sheets 연동**: 크롤링 결과를 자동으로 스프레드시트에 기록
-- 🏘️ **23개 단지 지원**: 미성, 현대, 한양, 대림 등 23개 아파트 단지
+- 🏘️ **25개 단지 지원**: 미성, 현대, 한양, 대림과 비교단지 등 25개 아파트 단지
 - 💾 **결과 저장**: JSON 형태로 크롤링 결과 아티팩트 저장
 
 ## 🚀 설정 방법
@@ -75,8 +76,9 @@
 .
 ├── .github/
 │   └── workflows/
-│       └── naver-crawling.yml    # GitHub Actions 워크플로우
+│       └── crawling.yml          # Windows self-hosted 예약 실행
 ├── main_github.py                # 메인 크롤링 스크립트
+├── setup-runner-autostart.ps1    # Windows Runner 자동 시작 설정
 ├── requirements.txt              # Python 의존성
 └── README.md                     # 이 파일
 ```
@@ -84,7 +86,9 @@
 ## ▶️ 실행 방법
 
 ### 자동 실행
-- 매일 오전 9시(한국 시간)에 자동으로 실행됩니다.
+- 매일 오전 3시(한국 시간)에 자동으로 실행됩니다.
+- Windows 컴퓨터가 켜져 있고 Runner 서비스가 실행 중이어야 합니다.
+- 관리자 PowerShell에서 `setup-runner-autostart.ps1`을 한 번 실행하면 Windows 시작 시 Runner가 자동 실행됩니다.
 
 ### 수동 실행
 1. GitHub 저장소 → **Actions** 탭
@@ -136,7 +140,7 @@ python main_github.py
 
 ## 🏘️ 지원 단지 목록
 
-총 23개 단지:
+총 25개 단지:
 - 미성1차, 미성2차
 - 신현대
 - 현대1~8차, 현대10,13,14차, 현대65동, 현대빌라트
@@ -144,6 +148,8 @@ python main_github.py
 - 대림빌라트
 - 트리마제
 - 메이플자이
+- 한남더힐
+- 압구정하이츠파크
 
 ## ⚠️ 주의사항
 

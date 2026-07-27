@@ -1,10 +1,7 @@
 name: 부동산 데이터 정리 (정리만)
 
 on:
-  schedule:
-    # 크롤링 후 5분 뒤 실행 (UTC 18:05 = 한국 시간 오전 3:05)
-    - cron: '5 18 * * *'
-  workflow_dispatch:  # 수동 실행 버튼
+  workflow_dispatch:  # 필요할 때만 수동 실행
 
 jobs:
   process-data:
@@ -53,4 +50,3 @@ jobs:
       if: always()
       run: |
         rm -f service_account.json
-
