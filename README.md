@@ -5,7 +5,7 @@
 ## 📋 기능
 
 - 🤖 **자동 스케줄링**: 매일 오전 3시(한국 시간) 자동 실행
-- 🔁 **새 Runner 재시도**: 접속 또는 수집 검증 실패 시 새 GitHub Runner에서 최대 3회 시도
+- 🖥️ **Windows Runner**: 국내 인터넷 회선의 self-hosted Runner에서 안정적으로 실행
 - 🖱️ **수동 실행**: GitHub Actions 페이지에서 버튼 클릭으로 즉시 실행
 - 📊 **Google Sheets 연동**: 크롤링 결과를 자동으로 스프레드시트에 기록
 - 🏘️ **25개 단지 지원**: 미성, 현대, 한양, 대림과 비교단지 등 25개 아파트 단지
@@ -76,9 +76,9 @@
 .
 ├── .github/
 │   └── workflows/
-│       ├── crawling.yml          # 예약 실행 및 재시도 제어
-│       └── naver-attempt.yml     # 공용 Runner 단일 실행
+│       └── crawling.yml          # Windows self-hosted 예약 실행
 ├── main_github.py                # 메인 크롤링 스크립트
+├── setup-runner-autostart.ps1    # Windows Runner 자동 시작 설정
 ├── requirements.txt              # Python 의존성
 └── README.md                     # 이 파일
 ```
@@ -87,6 +87,8 @@
 
 ### 자동 실행
 - 매일 오전 3시(한국 시간)에 자동으로 실행됩니다.
+- Windows 컴퓨터가 켜져 있고 Runner 서비스가 실행 중이어야 합니다.
+- 관리자 PowerShell에서 `setup-runner-autostart.ps1`을 한 번 실행하면 Windows 시작 시 Runner가 자동 실행됩니다.
 
 ### 수동 실행
 1. GitHub 저장소 → **Actions** 탭
