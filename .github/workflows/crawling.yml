@@ -1,162 +1,58 @@
-name: 네이버 부동산 크롤링 및 데이터 정리 (Windows Self-hosted)
+name: 네이버 부동산 크롤링 및 데이터 정리
 
 on:
   schedule:
     # 매일 오전 3시 (한국 시간) = UTC 18시
-    - cron: '0 18 * * *'
+    - cron: "0 18 * * *"
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: naver-land-daily
+  cancel-in-progress: false
+
 jobs:
-  crawl-and-process:
-    runs-on: [self-hosted, windows]
-    timeout-minutes: 60
+  attempt1:
+    name: Attempt 1
+    uses: ./.github/workflows/naver-attempt.yml
+    with:
+      attempt_name: attempt1
+    secrets: inherit
 
+  attempt2:
+    name: Attempt 2
+    needs: attempt1
+    if: always() && needs.attempt1.outputs.success != '1'
+    uses: ./.github/workflows/naver-attempt.yml
+    with:
+      attempt_name: attempt2
+    secrets: inherit
+
+  attempt3:
+    name: Attempt 3
+    needs: [attempt1, attempt2]
+    if: always() && needs.attempt1.outputs.success != '1' && needs.attempt2.outputs.success != '1'
+    uses: ./.github/workflows/naver-attempt.yml
+    with:
+      attempt_name: attempt3
+    secrets: inherit
+
+  final-status:
+    name: 최종 결과
+    if: always()
+    needs: [attempt1, attempt2, attempt3]
+    runs-on: ubuntu-latest
     steps:
-      - name: 코드 체크아웃
-        uses: actions/checkout@v4
-
-      - name: Runner 환경 진단 (UTF-8)
-        shell: powershell
-        env:
-          PYTHONUTF8: "1"
-          PYTHONIOENCODING: "utf-8"
+      - name: 성공 여부 확인
+        shell: bash
         run: |
-          chcp 65001 | Out-Null
-          [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false
-          $OutputEncoding = New-Object System.Text.UTF8Encoding $false
-
-          Write-Host "=== WHOAMI ==="
-          whoami
-
-          Write-Host "=== PATH ==="
-          $env:Path
-
-          Write-Host "=== where python / py ==="
-          where.exe python
-          where.exe py
-
-          if (!(Test-Path "C:\Python311\python.exe")) {
-            Write-Error "C:\Python311\python.exe 를 찾을 수 없습니다."
-            exit 1
-          }
-          & "C:\Python311\python.exe" --version
-
-      - name: Python 의존성 설치 (절대경로 Python)
-        shell: powershell
-        env:
-          PYTHONUTF8: "1"
-          PYTHONIOENCODING: "utf-8"
-        run: |
-          chcp 65001 | Out-Null
-          [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false
-          $OutputEncoding = New-Object System.Text.UTF8Encoding $false
-
-          & "C:\Python311\python.exe" -m pip install --upgrade pip
-          & "C:\Python311\python.exe" -m pip --version
-          & "C:\Python311\python.exe" -m pip install -r requirements.txt
-
-      - name: Playwright 브라우저 설치 (Windows)
-        shell: powershell
-        env:
-          PYTHONUTF8: "1"
-          PYTHONIOENCODING: "utf-8"
-        run: |
-          chcp 65001 | Out-Null
-          [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false
-          $OutputEncoding = New-Object System.Text.UTF8Encoding $false
-
-          & "C:\Python311\python.exe" -m playwright install chromium
-
-      - name: 파일 목록 확인 (디버깅)
-        shell: powershell
-        run: |
-          chcp 65001 | Out-Null
-          [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false
-          $OutputEncoding = New-Object System.Text.UTF8Encoding $false
-
-          Write-Host "=== 현재 디렉토리 ==="
-          Get-Location
-          Write-Host ""
-          Write-Host "=== 루트 파일 목록 ==="
-          Get-ChildItem -Force
-          Write-Host ""
-          Write-Host "=== Python 파일 목록(상위 20개) ==="
-          Get-ChildItem -Recurse -Filter *.py -File | Select-Object -First 20 | ForEach-Object { $_.FullName }
-
-      - name: 서비스 계정 키 생성 (BOM 제거, UTF-8 no BOM)
-        shell: powershell
-        env:
-          SERVICE_ACCOUNT_JSON: ${{ secrets.SERVICE_ACCOUNT_JSON }}
-        run: |
-          chcp 65001 | Out-Null
-          [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false
-          $OutputEncoding = New-Object System.Text.UTF8Encoding $false
-
-          $json = $env:SERVICE_ACCOUNT_JSON
-          if ([string]::IsNullOrWhiteSpace($json)) {
-            Write-Error "SERVICE_ACCOUNT_JSON secret이 비어있습니다."
-            exit 1
-          }
-
-          # BOM(U+FEFF) 제거
-          $json = $json -replace "^\uFEFF", ""
-          $json = $json -replace "\uFEFF", ""
-
-          # UTF-8 (BOM 없음)로 저장
-          [System.IO.File]::WriteAllText("service_account.json", $json, (New-Object System.Text.UTF8Encoding($false)))
-
-          Write-Host "service_account.json 생성 완료(UTF-8 no BOM)"
-          $bytes = [IO.File]::ReadAllBytes("service_account.json")
-          $n = [Math]::Min(10, $bytes.Length)
-          Write-Host ("첫 바이트(최대 10): " + ([BitConverter]::ToString($bytes[0..($n-1)])))
-
-      - name: 크롤링 및 데이터 정리 실행 (절대경로 Python)
-        shell: powershell
-        env:
-          SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
-          PYTHONUTF8: "1"
-          PYTHONIOENCODING: "utf-8"
-        run: |
-          chcp 65001 | Out-Null
-          [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false
-          $OutputEncoding = New-Object System.Text.UTF8Encoding $false
-
-          Write-Host "=== 크롤러 파일 찾기 ==="
-
-          if (Test-Path "main_github.py") {
-            Write-Host "✅ main_github.py 발견"
-            & "C:\Python311\python.exe" main_github.py
-          }
-          elseif (Test-Path "crawler_with_processor.py") {
-            Write-Host "✅ crawler_with_processor.py 발견"
-            & "C:\Python311\python.exe" crawler_with_processor.py
-          }
-          elseif (Test-Path "naver_crawler_playwright.py") {
-            Write-Host "⚠️ main_github.py를 찾을 수 없습니다."
-            Write-Host "⚠️ naver_crawler_playwright.py를 사용합니다."
-            & "C:\Python311\python.exe" naver_crawler_playwright.py
-          }
-          else {
-            Write-Error "❌ 오류: 크롤러 파일을 찾을 수 없습니다!"
-            Get-ChildItem -Recurse -Filter *.py -File | Select-Object -First 20 | ForEach-Object { $_.FullName }
-            exit 1
-          }
-
-      - name: 크롤링 결과 업로드
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: crawling-results-${{ github.run_number }}
-          path: |
-            crawling_results.json
-          retention-days: 30
-
-      - name: 정리
-        if: always()
-        shell: powershell
-        run: |
-          chcp 65001 | Out-Null
-          [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false
-          $OutputEncoding = New-Object System.Text.UTF8Encoding $false
-
-          Remove-Item -Force service_account.json -ErrorAction SilentlyContinue
+          if [[ "${{ needs.attempt1.outputs.success }}" == "1" ||
+                "${{ needs.attempt2.outputs.success }}" == "1" ||
+                "${{ needs.attempt3.outputs.success }}" == "1" ]]; then
+            echo "네이버 부동산 크롤링 성공"
+            exit 0
+          fi
+          echo "3개의 GitHub Runner에서 모두 실패했습니다."
+          exit 1
