@@ -19,7 +19,8 @@ on:
 
 jobs:
   crawl:
-    runs-on: ubuntu-latest
+    # Playwright 1.40과 시스템 패키지 호환성을 위해 버전을 고정한다.
+    runs-on: ubuntu-22.04
     timeout-minutes: 60
     outputs:
       success: ${{ steps.result.outputs.success }}
