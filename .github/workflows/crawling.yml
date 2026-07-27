@@ -19,7 +19,7 @@ permissions:
 
 concurrency:
   group: naver-land-daily
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   attempt1:
