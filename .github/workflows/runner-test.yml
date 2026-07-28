@@ -83,6 +83,12 @@ jobs:
           & $env:PYTHON_EXE -m playwright install chromium
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: 중개업소 상세정보 로직 테스트
+        shell: powershell
+        run: |
+          & $env:PYTHON_EXE -m unittest -v test_broker_contacts.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: 테스트 완료
         shell: powershell
-        run: Write-Host "HOME Windows Runner 테스트 성공"
+        run: Write-Host "HOME Windows Runner test passed"
