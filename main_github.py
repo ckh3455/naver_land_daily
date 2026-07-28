@@ -1940,9 +1940,15 @@ async def main():
                         )
 
                 complex_broker_details = [
-                    prop.get("broker_detail")
+                    (
+                        prop.get("broker_detail")
+                        if isinstance(prop.get("broker_detail"), dict)
+                        else _extract_broker_detail(
+                            prop.get("raw_data", {}),
+                            prop.get("raw_data", {})
+                        )
+                    )
                     for prop in result.get("properties", [])
-                    if isinstance(prop.get("broker_detail"), dict)
                 ]
                 try:
                     update_brokerage_contact_sheet(
