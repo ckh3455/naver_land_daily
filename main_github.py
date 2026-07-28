@@ -1,3 +1,19 @@
+test_external_with_five_ads_is_promoted_to_bad (test_broker_contacts.BrokerContactTests.test_external_with_five_ads_is_promoted_to_bad) ... ok
+test_extracts_realtor_contact_fields (test_broker_contacts.BrokerContactTests.test_extracts_realtor_contact_fields) ... ok
+test_same_address_rows_share_existing_canonical_name (test_broker_contacts.BrokerContactTests.test_same_address_rows_share_existing_canonical_name) ... [Broker] 활성 광고 5건 이상 외부업소 1행을 양아치업소로 자동 변경
+[Broker] 연락처 갱신 2행, 외부업소 추가 0행, 주소/전화 동일업소 통합 1그룹
+[Broker] 연락처 갱신 0행, 외부업소 추가 0행, 주소/전화 동일업소 통합 1그룹
+[Broker] 연락처 갱신 0행, 외부업소 추가 1행, 주소/전화 동일업소 통합 0그룹
+[Broker] 연락처 갱신 0행, 외부업소 추가 0행, 주소/전화 동일업소 통합 0그룹
+ok
+test_same_phone_groups_rows_and_preserves_bad_type (test_broker_contacts.BrokerContactTests.test_same_phone_groups_rows_and_preserves_bad_type) ... ok
+test_unknown_broker_is_recorded_as_external (test_broker_contacts.BrokerContactTests.test_unknown_broker_is_recorded_as_external) ... ok
+test_unknown_broker_without_contact_is_not_appended (test_broker_contacts.BrokerContactTests.test_unknown_broker_without_contact_is_not_appended) ... ok
+
+----------------------------------------------------------------------
+Ran 6 tests in 0.001s
+
+OK
 #!/usr/bin/env python3
 """
 GitHub Actions용 네이버 부동산 크롤러 + 데이터 정리 통합 스크립트
@@ -1167,8 +1183,8 @@ def update_brokerage_contact_sheet(sheet_service, spreadsheet_id, broker_details
 
 def prepare_brokerage_contact_sheet(sheet_service, spreadsheet_id):
     """
-    실행 시작 시 이전 실행의 외부업소만 제거한다.
-    수동 분류한 압구정업소·양아치업소는 보존한다.
+    사용자가 정리한 압구정업소·외부업소·양아치업소를 모두 보존하고
+    구분값과 드롭다운만 정리한다.
     """
     result = sheet_service.spreadsheets().values().get(
         spreadsheetId=spreadsheet_id,
@@ -1184,8 +1200,6 @@ def prepare_brokerage_contact_sheet(sheet_service, spreadsheet_id):
         row = list(source[:7])
         row.extend([""] * (7 - len(row)))
         row_type = normalize(row[6]) or ALIAS_INTERNAL_TYPE
-        if row_type == ALIAS_EXTERNAL_TYPE:
-            continue
         row[6] = row_type if row_type in ALIAS_TYPE_OPTIONS else ALIAS_INTERNAL_TYPE
         kept_rows.append(row)
 
@@ -1202,8 +1216,8 @@ def prepare_brokerage_contact_sheet(sheet_service, spreadsheet_id):
     ).execute()
     _apply_broker_type_dropdown(sheet_service, spreadsheet_id, len(output))
     print(
-        f"[Broker] 이전 외부업소 초기화 완료, "
-        f"압구정/양아치업소 {len(kept_rows)}행 보존"
+        f"[Broker] 사용자 분류 {len(kept_rows)}행 보존 및 "
+        "구분 드롭다운 정리 완료"
     )
 
 def promote_frequent_external_brokers(
@@ -1870,8 +1884,8 @@ async def main():
     sheet_service = build('sheets', 'v4', credentials=credentials)
     spreadsheet_id = os.environ.get('SPREADSHEET_ID', '1QP56lm5kPBdsUhrgcgY2U-JdmukXIkKCSxefd1QExKE')
 
-    # 기존 수동 분류는 보존하고, 이전 실행에서 누적된 외부업소만 초기화한다.
-    # 구분 열의 드롭다운도 이 단계에서 즉시 적용한다.
+    # 사용자가 정리한 세 가지 분류를 모두 보존하고,
+    # 구분 열의 드롭다운을 이 단계에서 즉시 적용한다.
     prepare_brokerage_contact_sheet(sheet_service, spreadsheet_id)
 
     headers = [
