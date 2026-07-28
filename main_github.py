@@ -1073,13 +1073,8 @@ def update_brokerage_contact_sheet(sheet_service, spreadsheet_id, broker_details
         ]
 
         if not matching_indexes:
-            has_contact = any(
-                _clean_detail_value(detail.get(key))
-                for key in ("address", "office_phone", "mobile_phone")
-            )
-            if not has_contact:
-                # 상세조회 실패로 이름만 얻은 외부업소는 빈 행으로 누적하지 않는다.
-                continue
+            # 압구정 활성 광고에서 발견된 외부업소는 연락처 조회가 실패해도
+            # 우선 명단에 올려 사용자가 분류할 수 있게 한다.
             rows.append([
                 realtor_id,
                 name,
