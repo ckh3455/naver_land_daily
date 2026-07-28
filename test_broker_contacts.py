@@ -100,6 +100,12 @@ class _FakeService:
 
 
 class BrokerContactTests(unittest.TestCase):
+    def test_broker_name_key_ignores_spacing(self):
+        self.assertEqual(
+            main.broker_name_key("Hi(하우스이야기)압구정공인중개사사무소"),
+            main.broker_name_key("Hi(하우스이야기)압구정 공인중개사사무소")
+        )
+
     def test_extracts_realtor_contact_fields(self):
         payload = {
             "articleRealtor": {
