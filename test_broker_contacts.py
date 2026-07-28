@@ -57,6 +57,9 @@ class _ValuesApi:
         self.updated = kwargs
         return self
 
+    def clear(self, **_kwargs):
+        return self
+
     def execute(self):
         if self.updated is not None:
             return {"updatedRows": len(self.updated["body"]["values"])}
@@ -69,6 +72,22 @@ class _SheetsApi:
 
     def values(self):
         return self.values_api
+
+    def get(self, **_kwargs):
+        return self
+
+    def batchUpdate(self, **_kwargs):
+        return self
+
+    def execute(self):
+        return {
+            "sheets": [{
+                "properties": {
+                    "sheetId": 123,
+                    "title": main.ALIAS_SHEET_NAME
+                }
+            }]
+        }
 
 
 class _FakeService:
@@ -157,6 +176,24 @@ class BrokerContactTests(unittest.TestCase):
         self.assertEqual(output[2][0], "outside-1")
         self.assertEqual(output[2][1], "외부중개업소")
         self.assertEqual(output[2][6], "외부업소")
+
+    def test_same_phone_groups_rows_and_preserves_bad_type(self):
+        initial = [
+            ["ID", "중개업소명", "실제상호", "주소", "사무실번호", "휴대전화", "구분"],
+            ["id-1", "상호A", "주의업소", "", "02-111-2222", "", "양아치업소"],
+            ["id-2", "상호B", "다른상호", "", "02-111-2222", "", "외부업소"],
+        ]
+        service = _FakeService(initial)
+        main.update_brokerage_contact_sheet(
+            service,
+            "sheet-id",
+            [{"id": "id-2", "name": "상호B"}]
+        )
+        output = service.values_api.updated["body"]["values"]
+        self.assertEqual(output[1][2], "주의업소")
+        self.assertEqual(output[2][2], "주의업소")
+        self.assertEqual(output[1][6], "양아치업소")
+        self.assertEqual(output[2][6], "양아치업소")
 
 
 if __name__ == "__main__":
