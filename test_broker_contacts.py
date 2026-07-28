@@ -122,6 +122,15 @@ class BrokerContactTests(unittest.TestCase):
         self.assertEqual(detail["office_phone"], "02-111-2222")
         self.assertEqual(detail["mobile_phone"], "010-3333-4444")
 
+    def test_raw_listing_still_builds_broker_record_without_detail(self):
+        raw = {
+            "realtorId": 5447772,
+            "realtorName": "(주)중앙리얼티부동산중개법인"
+        }
+        detail = main._extract_broker_detail(raw, raw)
+        self.assertEqual(detail["id"], "5447772")
+        self.assertEqual(detail["name"], "(주)중앙리얼티부동산중개법인")
+
     def test_same_address_rows_share_existing_canonical_name(self):
         initial = [
             ["ID", "중개업소명", "실제상호", "주소", "연락처", "연락처"],
