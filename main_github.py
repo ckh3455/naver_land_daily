@@ -934,6 +934,10 @@ def normalize(v):
     # 모든 종류의 공백(탭/개행/연속 공백 등)을 1칸으로 축약
     return re.sub(r"\s+", " ", s).strip()
 
+def broker_name_key(v):
+    """중개업소명 비교용 키: 표기 중간의 모든 공백을 무시한다."""
+    return re.sub(r"\s+", "", normalize(v)).lower()
+
 def _normalize_address_key(value):
     text = normalize(value)
     if not text:
@@ -1065,7 +1069,7 @@ def update_brokerage_contact_sheet(sheet_service, spreadsheet_id, broker_details
         matching_indexes = [
             index for index, row in enumerate(rows)
             if (realtor_id and _id_or_empty(row[0]) == realtor_id)
-            or (name and normalize(row[1]) == name)
+            or (name and broker_name_key(row[1]) == broker_name_key(name))
         ]
 
         if not matching_indexes:
@@ -1351,7 +1355,7 @@ def load_brokerage_alias_maps(sheet_service, spreadsheet_id):
             if idx_name >= 0 and len(row) > idx_name:
                 name = normalize(row[idx_name])
                 if name:
-                    by_name[name] = canon
+                    by_name[broker_name_key(name)] = canon
 
             if idx_id >= 0 and len(row) > idx_id:
                 id_val = normalize(row[idx_id])
@@ -1428,7 +1432,7 @@ def process_duplicate_listings(rows, alias):
         raw_name = normalize(r[COL_중개업소] if len(r) > COL_중개업소 else "")
         raw_id = normalize(r[COL_중개업소ID] if len(r) > COL_중개업소ID else "")
 
-        display_name = alias.get("byName", {}).get(raw_name)
+        display_name = alias.get("byName", {}).get(broker_name_key(raw_name))
         if not display_name and raw_id:
             display_name = alias.get("byId", {}).get(raw_id)
         if not display_name:
