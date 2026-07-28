@@ -9,9 +9,16 @@ permissions:
 jobs:
   runner-diagnostic:
     runs-on: [self-hosted, windows, home]
-    timeout-minutes: 5
+    timeout-minutes: 15
+
+    env:
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: "utf-8"
 
     steps:
+      - name: 코드 체크아웃
+        uses: actions/checkout@v4
+
       - name: Runner 정보 확인
         shell: powershell
         run: |
@@ -37,9 +44,26 @@ jobs:
             Write-Error "지원되는 Python을 찾을 수 없습니다."
             exit 1
           }
+          "PYTHON_EXE=$python" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           Write-Host "Python executable: $python"
           & $python --version
-          & $python -c "import playwright, gspread, googleapiclient; print('required packages OK')"
+
+      - name: 필수 패키지 설치 및 확인
+        shell: powershell
+        run: |
+          & $env:PYTHON_EXE -c "import playwright, gspread, googleapiclient"
+          if ($LASTEXITCODE -ne 0) {
+            & $env:PYTHON_EXE -m pip install -r requirements.txt
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          & $env:PYTHON_EXE -c "import playwright, gspread, googleapiclient; print('required packages OK')"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Chromium 설치 확인
+        shell: powershell
+        run: |
+          & $env:PYTHON_EXE -m playwright install chromium
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: 테스트 완료
         shell: powershell
