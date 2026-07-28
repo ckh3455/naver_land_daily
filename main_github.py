@@ -1,19 +1,3 @@
-test_external_with_five_ads_is_promoted_to_bad (test_broker_contacts.BrokerContactTests.test_external_with_five_ads_is_promoted_to_bad) ... ok
-test_extracts_realtor_contact_fields (test_broker_contacts.BrokerContactTests.test_extracts_realtor_contact_fields) ... ok
-test_same_address_rows_share_existing_canonical_name (test_broker_contacts.BrokerContactTests.test_same_address_rows_share_existing_canonical_name) ... [Broker] 활성 광고 5건 이상 외부업소 1행을 양아치업소로 자동 변경
-[Broker] 연락처 갱신 2행, 외부업소 추가 0행, 주소/전화 동일업소 통합 1그룹
-[Broker] 연락처 갱신 0행, 외부업소 추가 0행, 주소/전화 동일업소 통합 1그룹
-[Broker] 연락처 갱신 0행, 외부업소 추가 1행, 주소/전화 동일업소 통합 0그룹
-[Broker] 연락처 갱신 0행, 외부업소 추가 0행, 주소/전화 동일업소 통합 0그룹
-ok
-test_same_phone_groups_rows_and_preserves_bad_type (test_broker_contacts.BrokerContactTests.test_same_phone_groups_rows_and_preserves_bad_type) ... ok
-test_unknown_broker_is_recorded_as_external (test_broker_contacts.BrokerContactTests.test_unknown_broker_is_recorded_as_external) ... ok
-test_unknown_broker_without_contact_is_not_appended (test_broker_contacts.BrokerContactTests.test_unknown_broker_without_contact_is_not_appended) ... ok
-
-----------------------------------------------------------------------
-Ran 6 tests in 0.001s
-
-OK
 #!/usr/bin/env python3
 """
 GitHub Actions용 네이버 부동산 크롤러 + 데이터 정리 통합 스크립트
