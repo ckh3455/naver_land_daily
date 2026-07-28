@@ -329,7 +329,7 @@ def _resolve_price_change(raw):
 
 class AggressiveCardScroll:
     """네이버 부동산 매물 크롤러 (개선된 스크롤 방식)"""
-    def __init__(self, complex_id, complex_name):
+    def __init__(self, complex_id, complex_name, collect_broker_details=True):
         self.complex_id = complex_id
         self.complex_name = complex_name
         self.base_url = f"https://new.land.naver.com/complexes/{self.complex_id}"
@@ -338,6 +338,7 @@ class AggressiveCardScroll:
         self.page = None
         self.api_responses = []
         self.more_data = True
+        self.collect_broker_details_enabled = collect_broker_details
 
     # --------------------------------------------------------------------
     # ✅ 접속(네트워크) 부분만 수정:
@@ -657,7 +658,10 @@ class AggressiveCardScroll:
                     "WARNING"
                 )
 
-        for cache_key, prop in representatives.items():
+        total_representatives = len(representatives)
+        for detail_index, (cache_key, prop) in enumerate(
+            representatives.items(), 1
+        ):
             raw = prop.get("raw_data", {})
             baseline = _extract_broker_detail(raw, raw)
 
@@ -686,15 +690,22 @@ class AggressiveCardScroll:
                         payload = await self.page.evaluate(
                             """
                             async ({articleNo, headers}) => {
-                              const response = await fetch(`/api/articles/${articleNo}`, {
-                                method: 'GET',
-                                credentials: 'include',
-                                headers
-                              });
-                              if (!response.ok) {
-                                throw new Error(`HTTP ${response.status}`);
+                              const controller = new AbortController();
+                              const timer = setTimeout(() => controller.abort(), 10000);
+                              try {
+                                const response = await fetch(`/api/articles/${articleNo}`, {
+                                  method: 'GET',
+                                  credentials: 'include',
+                                  headers,
+                                  signal: controller.signal
+                                });
+                                if (!response.ok) {
+                                  throw new Error(`HTTP ${response.status}`);
+                                }
+                                return await response.json();
+                              } finally {
+                                clearTimeout(timer);
                               }
-                              return await response.json();
                             }
                             """,
                             {
@@ -738,6 +749,12 @@ class AggressiveCardScroll:
             prop["broker_detail"] = detail
             if detail.get("address") or detail.get("office_phone") or detail.get("mobile_phone"):
                 new_count += 1
+            if detail_index % 10 == 0 or detail_index == total_representatives:
+                debug_log(
+                    f"중개업소 상세조회 진행 "
+                    f"{detail_index}/{total_representatives}곳",
+                    "INFO"
+                )
             await asyncio.sleep(0.15)
 
         # 동일 업소의 다른 매물에도 캐시된 상세정보 연결
@@ -766,7 +783,13 @@ class AggressiveCardScroll:
             await self.setup_playwright()
             await self.navigate_to_complex_page()
             await self.aggressive_scroll()
-            await self.collect_broker_details()
+            if self.collect_broker_details_enabled:
+                await self.collect_broker_details()
+            else:
+                debug_log(
+                    "비교 단지는 중개업소 상세조회를 생략합니다.",
+                    "INFO"
+                )
             await self.close_browser()
             return {
                 'complex_id': self.complex_id,
@@ -886,13 +909,20 @@ COLOR_집주인_저빈도_TEXT = {"red": 0.600, "green": 0.200, "blue": 0.800}
 DEFAULT_BLACK = {"red": 0, "green": 0, "blue": 0}
 
 EXCLUDED_COMPLEXES = ["메이플자이", "트리마제", "한남더힐", "압구정하이츠파크"]
+APGUJEONG_COMPLEX_NAMES = {
+    item["name"] for item in COMPLEXES
+    if item["name"] not in EXCLUDED_COMPLEXES
+}
 ALIAS_SHEET_NAME = "압구정 중개업소"
 ALIAS_HEADER_NAME = "중개업소명"
 ALIAS_HEADER_ID = "중개업소ID"
 ALIAS_HEADER_ID_FALLBACK = "ID"
 ALIAS_HEADER_CANON = "실제상호"
 ALIAS_HEADER_TYPE = "구분"
+ALIAS_INTERNAL_TYPE = "압구정업소"
 ALIAS_EXTERNAL_TYPE = "외부업소"
+ALIAS_BAD_TYPE = "양아치업소"
+ALIAS_TYPE_OPTIONS = [ALIAS_INTERNAL_TYPE, ALIAS_EXTERNAL_TYPE, ALIAS_BAD_TYPE]
 LOW_FREQUENCY_THRESHOLD = 3
 
 def normalize(v):
@@ -911,11 +941,88 @@ def _normalize_address_key(value):
     text = text.replace("서울특별시", "서울")
     return re.sub(r"[^0-9A-Za-z가-힣]", "", text).lower()
 
+def _normalize_phone_key(value):
+    digits = re.sub(r"\D", "", normalize(value))
+    return digits if len(digits) >= 8 else ""
+
+def _apply_broker_type_dropdown(sheet_service, spreadsheet_id, row_count):
+    metadata = sheet_service.spreadsheets().get(
+        spreadsheetId=spreadsheet_id
+    ).execute()
+    sheet_id = next(
+        sheet["properties"]["sheetId"]
+        for sheet in metadata.get("sheets", [])
+        if sheet["properties"]["title"] == ALIAS_SHEET_NAME
+    )
+    sheet_service.spreadsheets().batchUpdate(
+        spreadsheetId=spreadsheet_id,
+        body={"requests": [{
+            "setDataValidation": {
+                "range": {
+                    "sheetId": sheet_id,
+                    "startRowIndex": 1,
+                    "endRowIndex": max(row_count, 1000),
+                    "startColumnIndex": 6,
+                    "endColumnIndex": 7
+                },
+                "rule": {
+                    "condition": {
+                        "type": "ONE_OF_LIST",
+                        "values": [
+                            {"userEnteredValue": value}
+                            for value in ALIAS_TYPE_OPTIONS
+                        ]
+                    },
+                    "strict": True,
+                    "showCustomUi": True
+                }
+            }
+        }]}
+    ).execute()
+
+def _group_broker_rows(rows):
+    """주소 또는 전화번호가 같은 행을 연결된 동일 업소 그룹으로 묶는다."""
+    parent = list(range(len(rows)))
+
+    def find(index):
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
+
+    def union(left, right):
+        left_root, right_root = find(left), find(right)
+        if left_root != right_root:
+            parent[right_root] = left_root
+
+    seen = {}
+    for index, row in enumerate(rows):
+        keys = []
+        address = _normalize_address_key(row[3])
+        office_phone = _normalize_phone_key(row[4])
+        mobile_phone = _normalize_phone_key(row[5])
+        if address:
+            keys.append(f"address:{address}")
+        if office_phone:
+            keys.append(f"phone:{office_phone}")
+        if mobile_phone:
+            keys.append(f"phone:{mobile_phone}")
+        for key in keys:
+            if key in seen:
+                union(index, seen[key])
+            else:
+                seen[key] = index
+
+    groups = {}
+    for index in range(len(rows)):
+        groups.setdefault(find(index), []).append(index)
+    return [indexes for indexes in groups.values() if len(indexes) > 1]
+
 def update_brokerage_contact_sheet(sheet_service, spreadsheet_id, broker_details):
     """
     '압구정 중개업소'에 주소·사무실번호·휴대전화를 채운다.
     새로 발견한 업소도 추가하되 G열에 '외부업소'로 명시하여 판정에서 구분한다.
-    동일 주소 행은 첫 번째 기존 실제상호를 기준으로 하나의 업소로 묶는다.
+    동일 주소 또는 동일 전화번호 행은 첫 번째 기존 실제상호 기준으로 묶는다.
     """
     details = [d for d in broker_details if isinstance(d, dict)]
     if not details:
@@ -942,7 +1049,9 @@ def update_brokerage_contact_sheet(sheet_service, spreadsheet_id, broker_details
         row = list(source[:7])
         row.extend([""] * (7 - len(row)))
         if not normalize(row[6]):
-            row[6] = "압구정업소"
+            row[6] = ALIAS_INTERNAL_TYPE
+        elif normalize(row[6]) not in ALIAS_TYPE_OPTIONS:
+            row[6] = ALIAS_EXTERNAL_TYPE
         rows.append(row)
 
     updated = 0
@@ -987,22 +1096,17 @@ def update_brokerage_contact_sheet(sheet_service, spreadsheet_id, broker_details
             if changed:
                 updated += 1
 
-    address_groups = {}
-    for index, row in enumerate(rows):
-        address_key = _normalize_address_key(row[3])
-        if address_key:
-            address_groups.setdefault(address_key, []).append(index)
-
     grouped = 0
-    for indexes in address_groups.values():
-        if len(indexes) < 2:
-            continue
-
+    for indexes in _group_broker_rows(rows):
+        bad_indexes = [
+            i for i in indexes
+            if normalize(rows[i][6]) == ALIAS_BAD_TYPE
+        ]
         internal_indexes = [
             i for i in indexes
-            if normalize(rows[i][6]) != ALIAS_EXTERNAL_TYPE
+            if normalize(rows[i][6]) == ALIAS_INTERNAL_TYPE
         ]
-        canonical_source = internal_indexes or indexes
+        canonical_source = bad_indexes or internal_indexes or indexes
         canon = next((
             normalize(rows[i][2])
             for i in canonical_source
@@ -1018,7 +1122,12 @@ def update_brokerage_contact_sheet(sheet_service, spreadsheet_id, broker_details
         shared_address = next((rows[i][3] for i in indexes if normalize(rows[i][3])), "")
         shared_office = next((rows[i][4] for i in indexes if normalize(rows[i][4])), "")
         shared_mobile = next((rows[i][5] for i in indexes if normalize(rows[i][5])), "")
-        shared_type = "압구정업소" if internal_indexes else ALIAS_EXTERNAL_TYPE
+        if bad_indexes:
+            shared_type = ALIAS_BAD_TYPE
+        elif internal_indexes:
+            shared_type = ALIAS_INTERNAL_TYPE
+        else:
+            shared_type = ALIAS_EXTERNAL_TYPE
 
         for index in indexes:
             if canon:
@@ -1033,15 +1142,61 @@ def update_brokerage_contact_sheet(sheet_service, spreadsheet_id, broker_details
         grouped += 1
 
     output = [headers] + rows
+    sheet_service.spreadsheets().values().clear(
+        spreadsheetId=spreadsheet_id,
+        range=f"'{ALIAS_SHEET_NAME}'!A:G"
+    ).execute()
     sheet_service.spreadsheets().values().update(
         spreadsheetId=spreadsheet_id,
         range=f"'{ALIAS_SHEET_NAME}'!A1:G{len(output)}",
         valueInputOption="RAW",
         body={"values": output}
     ).execute()
+    _apply_broker_type_dropdown(sheet_service, spreadsheet_id, len(output))
     print(
         f"[Broker] 연락처 갱신 {updated}행, 외부업소 추가 {appended}행, "
-        f"동일주소 통합 {grouped}그룹"
+        f"주소/전화 동일업소 통합 {grouped}그룹"
+    )
+
+def prepare_brokerage_contact_sheet(sheet_service, spreadsheet_id):
+    """
+    실행 시작 시 이전 실행의 외부업소만 제거한다.
+    수동 분류한 압구정업소·양아치업소는 보존한다.
+    """
+    result = sheet_service.spreadsheets().values().get(
+        spreadsheetId=spreadsheet_id,
+        range=f"'{ALIAS_SHEET_NAME}'!A:G"
+    ).execute()
+    values = result.get("values", [])
+    headers = [
+        "ID", "중개업소명", "실제상호", "주소",
+        "사무실번호", "휴대전화", "구분"
+    ]
+    kept_rows = []
+    for source in values[1:]:
+        row = list(source[:7])
+        row.extend([""] * (7 - len(row)))
+        row_type = normalize(row[6]) or ALIAS_INTERNAL_TYPE
+        if row_type == ALIAS_EXTERNAL_TYPE:
+            continue
+        row[6] = row_type if row_type in ALIAS_TYPE_OPTIONS else ALIAS_INTERNAL_TYPE
+        kept_rows.append(row)
+
+    output = [headers] + kept_rows
+    sheet_service.spreadsheets().values().clear(
+        spreadsheetId=spreadsheet_id,
+        range=f"'{ALIAS_SHEET_NAME}'!A:G"
+    ).execute()
+    sheet_service.spreadsheets().values().update(
+        spreadsheetId=spreadsheet_id,
+        range=f"'{ALIAS_SHEET_NAME}'!A1:G{len(output)}",
+        valueInputOption="RAW",
+        body={"values": output}
+    ).execute()
+    _apply_broker_type_dropdown(sheet_service, spreadsheet_id, len(output))
+    print(
+        f"[Broker] 이전 외부업소 초기화 완료, "
+        f"압구정/양아치업소 {len(kept_rows)}행 보존"
     )
 
 def extract_dong_number(s):
@@ -1645,6 +1800,10 @@ async def main():
     sheet_service = build('sheets', 'v4', credentials=credentials)
     spreadsheet_id = os.environ.get('SPREADSHEET_ID', '1QP56lm5kPBdsUhrgcgY2U-JdmukXIkKCSxefd1QExKE')
 
+    # 기존 수동 분류는 보존하고, 이전 실행에서 누적된 외부업소만 초기화한다.
+    # 구분 열의 드롭다운도 이 단계에서 즉시 적용한다.
+    prepare_brokerage_contact_sheet(sheet_service, spreadsheet_id)
+
     headers = [
         "단지명", "거래구분", "동", "층수", "면적", "가격",
         "가격변동", "중복업소",
@@ -1666,7 +1825,13 @@ async def main():
         debug_log(f"{'#'*70}", "STEP")
 
         complex_start_time = time.time()
-        crawler = AggressiveCardScroll(complex_info['id'], complex_info['name'])
+        crawler = AggressiveCardScroll(
+            complex_info['id'],
+            complex_info['name'],
+            collect_broker_details=(
+                complex_info["name"] in APGUJEONG_COMPLEX_NAMES
+            )
+        )
         result = await crawler.run()
         complex_duration = time.time() - complex_start_time
 
@@ -1688,6 +1853,26 @@ async def main():
                         rows_to_append.append(formatted_row)
             all_rows.extend(rows_to_append)
             debug_log(f"✅ {complex_info['name']} 매물 {len(rows_to_append)}개 임시 저장 완료", "SUCCESS")
+
+            # 연락처는 전체 크롤링 종료를 기다리지 않고 압구정 단지별로 저장한다.
+            # 비교 단지의 중개업소는 '압구정 중개업소' 탭에 기록하지 않는다.
+            if complex_info["name"] in APGUJEONG_COMPLEX_NAMES:
+                complex_broker_details = [
+                    prop.get("broker_detail")
+                    for prop in result.get("properties", [])
+                    if isinstance(prop.get("broker_detail"), dict)
+                ]
+                try:
+                    update_brokerage_contact_sheet(
+                        sheet_service,
+                        spreadsheet_id,
+                        complex_broker_details
+                    )
+                except Exception as e:
+                    debug_log(
+                        f"{complex_info['name']} 중개업소 연락처 즉시 저장 실패: {e}",
+                        "WARNING"
+                    )
 
             results.append({
                 'complex_name': complex_info['name'],
@@ -1729,18 +1914,6 @@ async def main():
     for start in range(0, len(all_rows), 500):
         worksheet.append_rows(all_rows[start:start + 500], value_input_option='RAW')
     debug_log(f"✅ 구글 시트 원본 {len(all_rows)}행 기록 완료", "SUCCESS")
-
-    # 수집된 중개업소 상세정보를 기존 압구정 중개업소 목록에 보강한다.
-    # 주소가 같은 기존 행은 실제상호를 하나로 통합한 뒤 데이터 정리를 시작한다.
-    try:
-        update_brokerage_contact_sheet(
-            sheet_service,
-            spreadsheet_id,
-            BROKER_DETAIL_CACHE.values()
-        )
-    except Exception as e:
-        # 연락처 보강 실패가 핵심 매물 수집을 막지는 않도록 경고만 남긴다.
-        debug_log(f"중개업소 연락처 기록 실패: {e}", "WARNING")
 
     # 4) 데이터 정리
     debug_log("\n=== 4단계: 데이터 정리 실행 ===", "STEP")
