@@ -1206,6 +1206,69 @@ def prepare_brokerage_contact_sheet(sheet_service, spreadsheet_id):
         f"압구정/양아치업소 {len(kept_rows)}행 보존"
     )
 
+def promote_frequent_external_brokers(
+    sheet_service,
+    spreadsheet_id,
+    counts_by_id,
+    counts_by_name,
+    threshold=5
+):
+    """현재 활성 광고가 기준 이상인 외부업소를 양아치업소로 자동 승격한다."""
+    result = sheet_service.spreadsheets().values().get(
+        spreadsheetId=spreadsheet_id,
+        range=f"'{ALIAS_SHEET_NAME}'!A:G"
+    ).execute()
+    values = result.get("values", [])
+    if len(values) < 2:
+        return 0
+
+    rows = []
+    for source in values[1:]:
+        row = list(source[:7])
+        row.extend([""] * (7 - len(row)))
+        rows.append(row)
+
+    group_counts = {}
+    counted_identities = set()
+    for row in rows:
+        realtor_id = _id_or_empty(row[0])
+        name = normalize(row[1])
+        canon = normalize(row[2]) or name
+        identity = f"id:{realtor_id}" if realtor_id else f"name:{name}"
+        if not canon or identity in counted_identities:
+            continue
+        counted_identities.add(identity)
+        count = (
+            counts_by_id.get(realtor_id, 0)
+            if realtor_id
+            else counts_by_name.get(name, 0)
+        )
+        group_counts[canon] = group_counts.get(canon, 0) + count
+
+    promoted = 0
+    for row in rows:
+        if normalize(row[6]) != ALIAS_EXTERNAL_TYPE:
+            continue
+        canon = normalize(row[2]) or normalize(row[1])
+        if group_counts.get(canon, 0) >= threshold:
+            row[6] = ALIAS_BAD_TYPE
+            promoted += 1
+
+    if promoted:
+        output = [values[0][:7]] + rows
+        sheet_service.spreadsheets().values().update(
+            spreadsheetId=spreadsheet_id,
+            range=f"'{ALIAS_SHEET_NAME}'!A1:G{len(output)}",
+            valueInputOption="RAW",
+            body={"values": output}
+        ).execute()
+        _apply_broker_type_dropdown(sheet_service, spreadsheet_id, len(output))
+        print(
+            f"[Broker] 활성 광고 {threshold}건 이상 외부업소 "
+            f"{promoted}행을 양아치업소로 자동 변경"
+        )
+    return promoted
+
 def extract_dong_number(s):
     if not isinstance(s, str):
         return 0
@@ -1824,6 +1887,8 @@ async def main():
     debug_log("=== 2단계: 크롤링 실행 ===", "STEP")
     results = []
     all_rows = []
+    active_broker_counts_by_id = {}
+    active_broker_counts_by_name = {}
     total_start_time = time.time()
 
     for idx, complex_info in enumerate(COMPLEXES, 1):
@@ -1864,6 +1929,19 @@ async def main():
             # 연락처는 전체 크롤링 종료를 기다리지 않고 압구정 단지별로 저장한다.
             # 비교 단지의 중개업소는 '압구정 중개업소' 탭에 기록하지 않는다.
             if complex_info["name"] in APGUJEONG_COMPLEX_NAMES:
+                for prop in result.get("properties", []):
+                    raw = prop.get("raw_data", {})
+                    realtor_id = _extract_realtor_id(raw)
+                    broker_name = normalize(raw.get("realtorName"))
+                    if realtor_id:
+                        active_broker_counts_by_id[realtor_id] = (
+                            active_broker_counts_by_id.get(realtor_id, 0) + 1
+                        )
+                    elif broker_name:
+                        active_broker_counts_by_name[broker_name] = (
+                            active_broker_counts_by_name.get(broker_name, 0) + 1
+                        )
+
                 complex_broker_details = [
                     prop.get("broker_detail")
                     for prop in result.get("properties", [])
@@ -1874,6 +1952,13 @@ async def main():
                         sheet_service,
                         spreadsheet_id,
                         complex_broker_details
+                    )
+                    promote_frequent_external_brokers(
+                        sheet_service,
+                        spreadsheet_id,
+                        active_broker_counts_by_id,
+                        active_broker_counts_by_name,
+                        threshold=5
                     )
                 except Exception as e:
                     debug_log(
