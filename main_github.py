@@ -618,7 +618,7 @@ class AggressiveCardScroll:
                     '.item_list--article a[class*="item_link"]'
                 ).first
                 async with self.page.expect_response(
-                    lambda r: bool(re.search(r'/api/articles/\\d+(?:\\?|$)', r.url))
+                    lambda r: bool(re.search(r'/api/articles/\d+(?:\?|$)', r.url))
                               and '/api/articles/complex/' not in r.url,
                     timeout=10000
                 ) as response_info:
