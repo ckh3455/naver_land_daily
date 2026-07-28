@@ -124,7 +124,8 @@ class BrokerContactTests(unittest.TestCase):
         output = service.values_api.updated["body"]["values"]
 
         self.assertEqual(output[0], [
-            "ID", "중개업소명", "실제상호", "주소", "사무실번호", "휴대전화"
+            "ID", "중개업소명", "실제상호", "주소",
+            "사무실번호", "휴대전화", "구분"
         ])
         self.assertEqual(len(output), 3)
         self.assertEqual(output[1][2], "미-대표1")
@@ -133,6 +134,29 @@ class BrokerContactTests(unittest.TestCase):
         self.assertEqual(output[2][4], "02-111-2222")
         self.assertEqual(output[1][5], "010-3333-4444")
         self.assertEqual(output[2][5], "010-3333-4444")
+        self.assertEqual(output[1][6], "압구정업소")
+        self.assertEqual(output[2][6], "압구정업소")
+
+    def test_unknown_broker_is_recorded_as_external(self):
+        initial = [
+            ["ID", "중개업소명", "실제상호", "주소", "사무실번호", "휴대전화", "구분"],
+            ["known-1", "기존업소", "미-기존", "", "", "", "압구정업소"],
+        ]
+        details = [{
+            "id": "outside-1",
+            "name": "외부중개업소",
+            "address": "서울 서초구 외부로 10",
+            "office_phone": "02-555-1111",
+            "mobile_phone": "010-5555-1111",
+        }]
+        service = _FakeService(initial)
+        main.update_brokerage_contact_sheet(service, "sheet-id", details)
+        output = service.values_api.updated["body"]["values"]
+
+        self.assertEqual(len(output), 3)
+        self.assertEqual(output[2][0], "outside-1")
+        self.assertEqual(output[2][1], "외부중개업소")
+        self.assertEqual(output[2][6], "외부업소")
 
 
 if __name__ == "__main__":
