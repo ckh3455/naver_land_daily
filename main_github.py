@@ -599,6 +599,62 @@ class AggressiveCardScroll:
                 representatives[cache_key] = prop
 
         new_count = 0
+        detail_headers = None
+        seeded_payloads = {}
+
+        # 상세 API는 브라우저 화면에서 매물을 열 때 생성되는 인증 헤더가
+        # 있어야 한다. 목록의 첫 매물을 실제로 한 번 클릭해 그 요청을 확보한다.
+        if representatives and not BROKER_DETAIL_DISABLED:
+            try:
+                await self.page.evaluate("""
+                    () => {
+                      const container = document.querySelector('.item_list--article');
+                      if (container) container.scrollTop = 0;
+                    }
+                """)
+                await asyncio.sleep(0.8)
+                first_link = self.page.locator(
+                    '.item_list--article .item_link, '
+                    '.item_list--article a[class*="item_link"]'
+                ).first
+                async with self.page.expect_response(
+                    lambda r: bool(re.search(r'/api/articles/\\d+(?:\\?|$)', r.url))
+                              and '/api/articles/complex/' not in r.url,
+                    timeout=10000
+                ) as response_info:
+                    await first_link.click(timeout=5000)
+                seed_response = await response_info.value
+                if seed_response.ok:
+                    seed_payload = await seed_response.json()
+                    seed_article_match = re.search(
+                        r'/api/articles/(\d+)', seed_response.url
+                    )
+                    if seed_article_match:
+                        seeded_payloads[seed_article_match.group(1)] = seed_payload
+
+                    request_headers = await seed_response.request.all_headers()
+                    blocked_headers = {
+                        'host', 'content-length', 'cookie', 'connection',
+                        'accept-encoding', 'sec-fetch-site', 'sec-fetch-mode',
+                        'sec-fetch-dest'
+                    }
+                    detail_headers = {
+                        key: value
+                        for key, value in request_headers.items()
+                        if key.lower() not in blocked_headers
+                    }
+                    debug_log(
+                        "중개업소 상세조회 인증 준비 완료 "
+                        f"(헤더: {', '.join(sorted(detail_headers.keys()))})",
+                        "SUCCESS"
+                    )
+                await self.page.keyboard.press("Escape")
+            except Exception as e:
+                debug_log(
+                    f"중개업소 상세조회 인증 준비 실패: {e}",
+                    "WARNING"
+                )
+
         for cache_key, prop in representatives.items():
             raw = prop.get("raw_data", {})
             baseline = _extract_broker_detail(raw, raw)
@@ -614,16 +670,24 @@ class AggressiveCardScroll:
             detail = baseline
 
             fetch_succeeded = False
-            if article_no and not BROKER_DETAIL_DISABLED:
+            if article_no in seeded_payloads:
+                fetched = _extract_broker_detail(seeded_payloads[article_no], raw)
+                detail = {
+                    key: fetched.get(key) or baseline.get(key, "")
+                    for key in baseline.keys()
+                }
+                fetch_succeeded = True
+                BROKER_DETAIL_CONSECUTIVE_FAILURES = 0
+            elif article_no and detail_headers and not BROKER_DETAIL_DISABLED:
                 for attempt in range(1, 3):
                     try:
                         payload = await self.page.evaluate(
                             """
-                            async (articleNo) => {
+                            async ({articleNo, headers}) => {
                               const response = await fetch(`/api/articles/${articleNo}`, {
                                 method: 'GET',
                                 credentials: 'include',
-                                headers: {'Accept': 'application/json'}
+                                headers
                               });
                               if (!response.ok) {
                                 throw new Error(`HTTP ${response.status}`);
@@ -631,7 +695,10 @@ class AggressiveCardScroll:
                               return await response.json();
                             }
                             """,
-                            article_no
+                            {
+                                "articleNo": article_no,
+                                "headers": detail_headers
+                            }
                         )
                         fetched = _extract_broker_detail(payload, raw)
                         detail = {
@@ -658,6 +725,12 @@ class AggressiveCardScroll:
                             "이번 실행의 추가 상세조회를 중단합니다.",
                             "WARNING"
                         )
+            elif article_no and not detail_headers:
+                debug_log(
+                    "상세조회 인증 헤더를 확보하지 못해 이번 단지의 "
+                    "추가 중개업소 조회를 생략합니다.",
+                    "WARNING"
+                )
 
             BROKER_DETAIL_CACHE[cache_key] = detail
             prop["broker_detail"] = detail
