@@ -55,6 +55,8 @@ COMPLEXES = [
 # 같은 실행 안에서 동일 중개업소를 여러 번 상세조회하지 않도록 공유 캐시 사용
 BROKER_DETAIL_CACHE = {}
 BROKER_DETAIL_ATTEMPTED = set()
+BROKER_DETAIL_CONSECUTIVE_FAILURES = 0
+BROKER_DETAIL_DISABLED = False
 
 def debug_log(message, level="INFO"):
     """초상세 디버깅 로그"""
@@ -587,6 +589,8 @@ class AggressiveCardScroll:
         중개업소 ID별 대표 매물 한 건만 상세조회한다.
         상세조회 실패가 전체 매물 수집 실패로 이어지지 않도록 보조 단계로 처리한다.
         """
+        global BROKER_DETAIL_CONSECUTIVE_FAILURES, BROKER_DETAIL_DISABLED
+
         representatives = {}
         for prop in self.property_cards:
             raw = prop.get("raw_data", {})
@@ -609,7 +613,8 @@ class AggressiveCardScroll:
             article_no = _clean_detail_value(prop.get("article_no"))
             detail = baseline
 
-            if article_no:
+            fetch_succeeded = False
+            if article_no and not BROKER_DETAIL_DISABLED:
                 for attempt in range(1, 3):
                     try:
                         payload = await self.page.evaluate(
@@ -633,6 +638,8 @@ class AggressiveCardScroll:
                             key: fetched.get(key) or baseline.get(key, "")
                             for key in baseline.keys()
                         }
+                        fetch_succeeded = True
+                        BROKER_DETAIL_CONSECUTIVE_FAILURES = 0
                         break
                     except Exception as e:
                         debug_log(
@@ -641,6 +648,16 @@ class AggressiveCardScroll:
                             "WARNING"
                         )
                         await asyncio.sleep(attempt)
+
+                if not fetch_succeeded:
+                    BROKER_DETAIL_CONSECUTIVE_FAILURES += 1
+                    if BROKER_DETAIL_CONSECUTIVE_FAILURES >= 5:
+                        BROKER_DETAIL_DISABLED = True
+                        debug_log(
+                            "중개업소 상세조회가 5곳 연속 실패하여 "
+                            "이번 실행의 추가 상세조회를 중단합니다.",
+                            "WARNING"
+                        )
 
             BROKER_DETAIL_CACHE[cache_key] = detail
             prop["broker_detail"] = detail
@@ -799,6 +816,8 @@ ALIAS_HEADER_NAME = "중개업소명"
 ALIAS_HEADER_ID = "중개업소ID"
 ALIAS_HEADER_ID_FALLBACK = "ID"
 ALIAS_HEADER_CANON = "실제상호"
+ALIAS_HEADER_TYPE = "구분"
+ALIAS_EXTERNAL_TYPE = "외부업소"
 LOW_FREQUENCY_THRESHOLD = 3
 
 def normalize(v):
@@ -819,8 +838,8 @@ def _normalize_address_key(value):
 
 def update_brokerage_contact_sheet(sheet_service, spreadsheet_id, broker_details):
     """
-    기존 '압구정 중개업소' 행에 주소·사무실번호·휴대전화를 채운다.
-    외부업소 판정 목록을 오염시키지 않도록 기존 행만 갱신하고 새 행은 추가하지 않는다.
+    '압구정 중개업소'에 주소·사무실번호·휴대전화를 채운다.
+    새로 발견한 업소도 추가하되 G열에 '외부업소'로 명시하여 판정에서 구분한다.
     동일 주소 행은 첫 번째 기존 실제상호를 기준으로 하나의 업소로 묶는다.
     """
     details = [d for d in broker_details if isinstance(d, dict)]
@@ -830,49 +849,68 @@ def update_brokerage_contact_sheet(sheet_service, spreadsheet_id, broker_details
 
     result = sheet_service.spreadsheets().values().get(
         spreadsheetId=spreadsheet_id,
-        range=f"'{ALIAS_SHEET_NAME}'!A:F"
+        range=f"'{ALIAS_SHEET_NAME}'!A:G"
     ).execute()
     values = result.get("values", [])
     if not values:
-        values = [["ID", "중개업소명", "실제상호", "주소", "사무실번호", "휴대전화"]]
+        values = [[
+            "ID", "중개업소명", "실제상호", "주소",
+            "사무실번호", "휴대전화", "구분"
+        ]]
 
-    headers = ["ID", "중개업소명", "실제상호", "주소", "사무실번호", "휴대전화"]
+    headers = [
+        "ID", "중개업소명", "실제상호", "주소",
+        "사무실번호", "휴대전화", "구분"
+    ]
     rows = []
     for source in values[1:]:
-        row = list(source[:6])
-        row.extend([""] * (6 - len(row)))
+        row = list(source[:7])
+        row.extend([""] * (7 - len(row)))
+        if not normalize(row[6]):
+            row[6] = "압구정업소"
         rows.append(row)
 
-    by_id = {}
-    by_name = {}
+    updated = 0
+    appended = 0
     for detail in details:
         realtor_id = _id_or_empty(detail.get("id"))
         name = normalize(detail.get("name"))
-        if realtor_id:
-            by_id[realtor_id] = detail
-        if name and name not in by_name:
-            by_name[name] = detail
-
-    updated = 0
-    for row in rows:
-        realtor_id = _id_or_empty(row[0])
-        name = normalize(row[1])
-        detail = by_id.get(realtor_id) or by_name.get(name)
-        if not detail:
+        if not realtor_id and not name:
             continue
 
-        changed = False
-        for index, key in (
-            (3, "address"),
-            (4, "office_phone"),
-            (5, "mobile_phone")
-        ):
-            value = _clean_detail_value(detail.get(key))
-            if value and row[index] != value:
-                row[index] = value
-                changed = True
-        if changed:
-            updated += 1
+        matching_indexes = [
+            index for index, row in enumerate(rows)
+            if (realtor_id and _id_or_empty(row[0]) == realtor_id)
+            or (name and normalize(row[1]) == name)
+        ]
+
+        if not matching_indexes:
+            rows.append([
+                realtor_id,
+                name,
+                name,
+                _clean_detail_value(detail.get("address")),
+                _clean_detail_value(detail.get("office_phone")),
+                _clean_detail_value(detail.get("mobile_phone")),
+                ALIAS_EXTERNAL_TYPE
+            ])
+            appended += 1
+            continue
+
+        for index in matching_indexes:
+            row = rows[index]
+            changed = False
+            for column, key in (
+                (3, "address"),
+                (4, "office_phone"),
+                (5, "mobile_phone")
+            ):
+                value = _clean_detail_value(detail.get(key))
+                if value and row[column] != value:
+                    row[column] = value
+                    changed = True
+            if changed:
+                updated += 1
 
     address_groups = {}
     for index, row in enumerate(rows):
@@ -885,13 +923,27 @@ def update_brokerage_contact_sheet(sheet_service, spreadsheet_id, broker_details
         if len(indexes) < 2:
             continue
 
-        canon = next((normalize(rows[i][2]) for i in indexes if normalize(rows[i][2])), "")
+        internal_indexes = [
+            i for i in indexes
+            if normalize(rows[i][6]) != ALIAS_EXTERNAL_TYPE
+        ]
+        canonical_source = internal_indexes or indexes
+        canon = next((
+            normalize(rows[i][2])
+            for i in canonical_source
+            if normalize(rows[i][2])
+        ), "")
         if not canon:
-            canon = next((normalize(rows[i][1]) for i in indexes if normalize(rows[i][1])), "")
+            canon = next((
+                normalize(rows[i][1])
+                for i in canonical_source
+                if normalize(rows[i][1])
+            ), "")
 
         shared_address = next((rows[i][3] for i in indexes if normalize(rows[i][3])), "")
         shared_office = next((rows[i][4] for i in indexes if normalize(rows[i][4])), "")
         shared_mobile = next((rows[i][5] for i in indexes if normalize(rows[i][5])), "")
+        shared_type = "압구정업소" if internal_indexes else ALIAS_EXTERNAL_TYPE
 
         for index in indexes:
             if canon:
@@ -902,16 +954,20 @@ def update_brokerage_contact_sheet(sheet_service, spreadsheet_id, broker_details
                 rows[index][4] = shared_office
             if shared_mobile and not normalize(rows[index][5]):
                 rows[index][5] = shared_mobile
+            rows[index][6] = shared_type
         grouped += 1
 
     output = [headers] + rows
     sheet_service.spreadsheets().values().update(
         spreadsheetId=spreadsheet_id,
-        range=f"'{ALIAS_SHEET_NAME}'!A1:F{len(output)}",
+        range=f"'{ALIAS_SHEET_NAME}'!A1:G{len(output)}",
         valueInputOption="RAW",
         body={"values": output}
     ).execute()
-    print(f"[Broker] 연락처 갱신 {updated}행, 동일주소 통합 {grouped}그룹")
+    print(
+        f"[Broker] 연락처 갱신 {updated}행, 외부업소 추가 {appended}행, "
+        f"동일주소 통합 {grouped}그룹"
+    )
 
 def extract_dong_number(s):
     if not isinstance(s, str):
@@ -976,12 +1032,16 @@ def load_brokerage_alias_maps(sheet_service, spreadsheet_id):
         else:
             idx_id = -1
         idx_canon = header.index(ALIAS_HEADER_CANON) if ALIAS_HEADER_CANON in header else -1
+        idx_type = header.index(ALIAS_HEADER_TYPE) if ALIAS_HEADER_TYPE in header else -1
 
         if idx_canon < 0:
             return {"byName": by_name, "byId": by_id, "validCanonNames": valid_canon_names, "knownCanonNames": known_canon_names}
 
         for row in values[1:]:
             if len(row) <= idx_canon:
+                continue
+            row_type = normalize(row[idx_type]) if idx_type >= 0 and len(row) > idx_type else ""
+            if row_type == ALIAS_EXTERNAL_TYPE:
                 continue
 
             canon = normalize(row[idx_canon])
