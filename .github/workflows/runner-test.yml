@@ -26,12 +26,20 @@ jobs:
       - name: Python 확인
         shell: powershell
         run: |
-          if (!(Test-Path "C:\Python311\python.exe")) {
-            Write-Error "C:\Python311\python.exe를 찾을 수 없습니다."
+          $pythonCandidates = @(
+            "C:\Python311\python.exe",
+            "C:\ProgramData\anaconda3\python.exe"
+          )
+          $python = $pythonCandidates |
+            Where-Object { Test-Path $_ } |
+            Select-Object -First 1
+          if (!$python) {
+            Write-Error "지원되는 Python을 찾을 수 없습니다."
             exit 1
           }
-          & "C:\Python311\python.exe" --version
-          & "C:\Python311\python.exe" -c "import playwright, gspread, googleapiclient; print('필수 패키지 확인 완료')"
+          Write-Host "Python executable: $python"
+          & $python --version
+          & $python -c "import playwright, gspread, googleapiclient; print('required packages OK')"
 
       - name: 테스트 완료
         shell: powershell
