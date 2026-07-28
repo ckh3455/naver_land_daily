@@ -209,6 +209,25 @@ class BrokerContactTests(unittest.TestCase):
         output = service.values_api.updated["body"]["values"]
         self.assertEqual(len(output), 2)
 
+    def test_external_with_five_ads_is_promoted_to_bad(self):
+        initial = [
+            ["ID", "중개업소명", "실제상호", "주소", "사무실번호", "휴대전화", "구분"],
+            ["outside-1", "외부상호", "외부대표", "서울 강남구", "02-111-2222", "", "외부업소"],
+            ["inside-1", "내부상호", "압-내부", "서울 강남구 2", "02-333-4444", "", "압구정업소"],
+        ]
+        service = _FakeService(initial)
+        promoted = main.promote_frequent_external_brokers(
+            service,
+            "sheet-id",
+            {"outside-1": 5, "inside-1": 10},
+            {},
+            threshold=5
+        )
+        output = service.values_api.updated["body"]["values"]
+        self.assertEqual(promoted, 1)
+        self.assertEqual(output[1][6], "양아치업소")
+        self.assertEqual(output[2][6], "압구정업소")
+
 
 if __name__ == "__main__":
     unittest.main()
