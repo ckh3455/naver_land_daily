@@ -52,6 +52,10 @@ COMPLEXES = [
     {"id": "9428", "name": "압구정하이츠파크"}
 ]
 
+# 같은 실행 안에서 동일 중개업소를 여러 번 상세조회하지 않도록 공유 캐시 사용
+BROKER_DETAIL_CACHE = {}
+BROKER_DETAIL_ATTEMPTED = set()
+
 def debug_log(message, level="INFO"):
     """초상세 디버깅 로그"""
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
@@ -161,6 +165,91 @@ def _extract_realtor_id(raw):
         except Exception:
             pass
     return ""
+
+def _clean_detail_value(value):
+    if value is None:
+        return ""
+    if isinstance(value, (list, tuple)):
+        return ", ".join(str(v).strip() for v in value if str(v).strip())
+    return str(value).strip()
+
+def _first_detail_value(obj, keys):
+    if not isinstance(obj, dict):
+        return ""
+    for key in keys:
+        value = _clean_detail_value(obj.get(key))
+        if value:
+            return value
+    return ""
+
+def _find_realtor_object(payload):
+    """상세 응답 구조가 바뀌어도 중개업소 정보 객체를 최대한 찾아낸다."""
+    if not isinstance(payload, dict):
+        return {}
+
+    for key in ("articleRealtor", "realtor", "realtorInfo", "agent", "office"):
+        value = payload.get(key)
+        if isinstance(value, dict):
+            return value
+
+    queue = [payload]
+    best = {}
+    best_score = 0
+    realtor_keys = {
+        "realtorId", "realtorName", "representativeName",
+        "representativeTelNo", "cellPhoneNo", "establishmentRegistrationNo",
+        "realtorAddress", "officeAddress"
+    }
+    while queue:
+        current = queue.pop(0)
+        if not isinstance(current, dict):
+            continue
+        score = len(realtor_keys.intersection(current.keys()))
+        if score > best_score:
+            best = current
+            best_score = score
+        for value in current.values():
+            if isinstance(value, dict):
+                queue.append(value)
+            elif isinstance(value, list):
+                queue.extend(v for v in value if isinstance(v, dict))
+    return best if best_score else {}
+
+def _extract_broker_detail(payload, fallback=None):
+    fallback = fallback if isinstance(fallback, dict) else {}
+    realtor = _find_realtor_object(payload)
+
+    realtor_id = _extract_realtor_id(realtor) or _extract_realtor_id(fallback)
+    name = _first_detail_value(realtor, (
+        "realtorName", "businessName", "officeName", "name"
+    )) or _first_detail_value(fallback, ("realtorName",))
+    address = _first_detail_value(realtor, (
+        "realtorAddress", "officeAddress", "roadAddress",
+        "address", "addressDetail"
+    ))
+    office_phone = _first_detail_value(realtor, (
+        "representativeTelNo", "officePhoneNo", "telephoneNo",
+        "telNo", "phoneNo", "realtorPhoneNo"
+    ))
+    mobile_phone = _first_detail_value(realtor, (
+        "cellPhoneNo", "mobilePhoneNo", "mobileNo",
+        "cellularPhoneNo", "representativeMobileNo"
+    ))
+
+    return {
+        "id": _id_or_empty(realtor_id),
+        "name": name,
+        "address": address,
+        "office_phone": office_phone,
+        "mobile_phone": mobile_phone
+    }
+
+def _broker_cache_key(raw):
+    realtor_id = _extract_realtor_id(raw)
+    if realtor_id:
+        return f"id:{realtor_id}"
+    name = _clean_detail_value(raw.get("realtorName"))
+    return f"name:{name}" if name else ""
 
 def _has_photos(raw):
     for k in ("siteImageCount", "representativeImageCount", "imageCount"):
@@ -493,6 +582,84 @@ class AggressiveCardScroll:
 
         debug_log(f"✅ 스크롤 완료 (총 {len(self.property_cards)}개 수집, {scroll_attempts}회 시도)", "SUCCESS")
 
+    async def collect_broker_details(self):
+        """
+        중개업소 ID별 대표 매물 한 건만 상세조회한다.
+        상세조회 실패가 전체 매물 수집 실패로 이어지지 않도록 보조 단계로 처리한다.
+        """
+        representatives = {}
+        for prop in self.property_cards:
+            raw = prop.get("raw_data", {})
+            cache_key = _broker_cache_key(raw)
+            if cache_key and cache_key not in representatives:
+                representatives[cache_key] = prop
+
+        new_count = 0
+        for cache_key, prop in representatives.items():
+            raw = prop.get("raw_data", {})
+            baseline = _extract_broker_detail(raw, raw)
+
+            if cache_key in BROKER_DETAIL_CACHE:
+                prop["broker_detail"] = BROKER_DETAIL_CACHE[cache_key]
+                continue
+            if cache_key in BROKER_DETAIL_ATTEMPTED:
+                continue
+
+            BROKER_DETAIL_ATTEMPTED.add(cache_key)
+            article_no = _clean_detail_value(prop.get("article_no"))
+            detail = baseline
+
+            if article_no:
+                for attempt in range(1, 3):
+                    try:
+                        payload = await self.page.evaluate(
+                            """
+                            async (articleNo) => {
+                              const response = await fetch(`/api/articles/${articleNo}`, {
+                                method: 'GET',
+                                credentials: 'include',
+                                headers: {'Accept': 'application/json'}
+                              });
+                              if (!response.ok) {
+                                throw new Error(`HTTP ${response.status}`);
+                              }
+                              return await response.json();
+                            }
+                            """,
+                            article_no
+                        )
+                        fetched = _extract_broker_detail(payload, raw)
+                        detail = {
+                            key: fetched.get(key) or baseline.get(key, "")
+                            for key in baseline.keys()
+                        }
+                        break
+                    except Exception as e:
+                        debug_log(
+                            f"중개업소 상세조회 실패 {cache_key} "
+                            f"(시도 {attempt}/2): {e}",
+                            "WARNING"
+                        )
+                        await asyncio.sleep(attempt)
+
+            BROKER_DETAIL_CACHE[cache_key] = detail
+            prop["broker_detail"] = detail
+            if detail.get("address") or detail.get("office_phone") or detail.get("mobile_phone"):
+                new_count += 1
+            await asyncio.sleep(0.15)
+
+        # 동일 업소의 다른 매물에도 캐시된 상세정보 연결
+        for prop in self.property_cards:
+            cache_key = _broker_cache_key(prop.get("raw_data", {}))
+            if cache_key and cache_key in BROKER_DETAIL_CACHE:
+                prop["broker_detail"] = BROKER_DETAIL_CACHE[cache_key]
+
+        debug_log(
+            f"중개업소 상세정보 수집: 신규 {new_count}곳, "
+            f"누적 캐시 {len(BROKER_DETAIL_CACHE)}곳",
+            "SUCCESS"
+        )
+
     async def close_browser(self):
         try:
             if hasattr(self, 'browser'):
@@ -507,6 +674,7 @@ class AggressiveCardScroll:
             await self.setup_playwright()
             await self.navigate_to_complex_page()
             await self.aggressive_scroll()
+            await self.collect_broker_details()
             await self.close_browser()
             return {
                 'complex_id': self.complex_id,
@@ -629,6 +797,7 @@ EXCLUDED_COMPLEXES = ["메이플자이", "트리마제", "한남더힐", "압구
 ALIAS_SHEET_NAME = "압구정 중개업소"
 ALIAS_HEADER_NAME = "중개업소명"
 ALIAS_HEADER_ID = "중개업소ID"
+ALIAS_HEADER_ID_FALLBACK = "ID"
 ALIAS_HEADER_CANON = "실제상호"
 LOW_FREQUENCY_THRESHOLD = 3
 
@@ -640,6 +809,109 @@ def normalize(v):
     s = re.sub(r"[\u200b\u200c\u200d\ufeff]", "", s)
     # 모든 종류의 공백(탭/개행/연속 공백 등)을 1칸으로 축약
     return re.sub(r"\s+", " ", s).strip()
+
+def _normalize_address_key(value):
+    text = normalize(value)
+    if not text:
+        return ""
+    text = text.replace("서울특별시", "서울")
+    return re.sub(r"[^0-9A-Za-z가-힣]", "", text).lower()
+
+def update_brokerage_contact_sheet(sheet_service, spreadsheet_id, broker_details):
+    """
+    기존 '압구정 중개업소' 행에 주소·사무실번호·휴대전화를 채운다.
+    외부업소 판정 목록을 오염시키지 않도록 기존 행만 갱신하고 새 행은 추가하지 않는다.
+    동일 주소 행은 첫 번째 기존 실제상호를 기준으로 하나의 업소로 묶는다.
+    """
+    details = [d for d in broker_details if isinstance(d, dict)]
+    if not details:
+        print("[Broker] 기록할 중개업소 상세정보가 없습니다.")
+        return
+
+    result = sheet_service.spreadsheets().values().get(
+        spreadsheetId=spreadsheet_id,
+        range=f"'{ALIAS_SHEET_NAME}'!A:F"
+    ).execute()
+    values = result.get("values", [])
+    if not values:
+        values = [["ID", "중개업소명", "실제상호", "주소", "사무실번호", "휴대전화"]]
+
+    headers = ["ID", "중개업소명", "실제상호", "주소", "사무실번호", "휴대전화"]
+    rows = []
+    for source in values[1:]:
+        row = list(source[:6])
+        row.extend([""] * (6 - len(row)))
+        rows.append(row)
+
+    by_id = {}
+    by_name = {}
+    for detail in details:
+        realtor_id = _id_or_empty(detail.get("id"))
+        name = normalize(detail.get("name"))
+        if realtor_id:
+            by_id[realtor_id] = detail
+        if name and name not in by_name:
+            by_name[name] = detail
+
+    updated = 0
+    for row in rows:
+        realtor_id = _id_or_empty(row[0])
+        name = normalize(row[1])
+        detail = by_id.get(realtor_id) or by_name.get(name)
+        if not detail:
+            continue
+
+        changed = False
+        for index, key in (
+            (3, "address"),
+            (4, "office_phone"),
+            (5, "mobile_phone")
+        ):
+            value = _clean_detail_value(detail.get(key))
+            if value and row[index] != value:
+                row[index] = value
+                changed = True
+        if changed:
+            updated += 1
+
+    address_groups = {}
+    for index, row in enumerate(rows):
+        address_key = _normalize_address_key(row[3])
+        if address_key:
+            address_groups.setdefault(address_key, []).append(index)
+
+    grouped = 0
+    for indexes in address_groups.values():
+        if len(indexes) < 2:
+            continue
+
+        canon = next((normalize(rows[i][2]) for i in indexes if normalize(rows[i][2])), "")
+        if not canon:
+            canon = next((normalize(rows[i][1]) for i in indexes if normalize(rows[i][1])), "")
+
+        shared_address = next((rows[i][3] for i in indexes if normalize(rows[i][3])), "")
+        shared_office = next((rows[i][4] for i in indexes if normalize(rows[i][4])), "")
+        shared_mobile = next((rows[i][5] for i in indexes if normalize(rows[i][5])), "")
+
+        for index in indexes:
+            if canon:
+                rows[index][2] = canon
+            if shared_address:
+                rows[index][3] = shared_address
+            if shared_office and not normalize(rows[index][4]):
+                rows[index][4] = shared_office
+            if shared_mobile and not normalize(rows[index][5]):
+                rows[index][5] = shared_mobile
+        grouped += 1
+
+    output = [headers] + rows
+    sheet_service.spreadsheets().values().update(
+        spreadsheetId=spreadsheet_id,
+        range=f"'{ALIAS_SHEET_NAME}'!A1:F{len(output)}",
+        valueInputOption="RAW",
+        body={"values": output}
+    ).execute()
+    print(f"[Broker] 연락처 갱신 {updated}행, 동일주소 통합 {grouped}그룹")
 
 def extract_dong_number(s):
     if not isinstance(s, str):
@@ -697,7 +969,12 @@ def load_brokerage_alias_maps(sheet_service, spreadsheet_id):
 
         header = values[0]
         idx_name = header.index(ALIAS_HEADER_NAME) if ALIAS_HEADER_NAME in header else -1
-        idx_id = header.index(ALIAS_HEADER_ID) if ALIAS_HEADER_ID in header else -1
+        if ALIAS_HEADER_ID in header:
+            idx_id = header.index(ALIAS_HEADER_ID)
+        elif ALIAS_HEADER_ID_FALLBACK in header:
+            idx_id = header.index(ALIAS_HEADER_ID_FALLBACK)
+        else:
+            idx_id = -1
         idx_canon = header.index(ALIAS_HEADER_CANON) if ALIAS_HEADER_CANON in header else -1
 
         if idx_canon < 0:
@@ -1317,6 +1594,18 @@ async def main():
     for start in range(0, len(all_rows), 500):
         worksheet.append_rows(all_rows[start:start + 500], value_input_option='RAW')
     debug_log(f"✅ 구글 시트 원본 {len(all_rows)}행 기록 완료", "SUCCESS")
+
+    # 수집된 중개업소 상세정보를 기존 압구정 중개업소 목록에 보강한다.
+    # 주소가 같은 기존 행은 실제상호를 하나로 통합한 뒤 데이터 정리를 시작한다.
+    try:
+        update_brokerage_contact_sheet(
+            sheet_service,
+            spreadsheet_id,
+            BROKER_DETAIL_CACHE.values()
+        )
+    except Exception as e:
+        # 연락처 보강 실패가 핵심 매물 수집을 막지는 않도록 경고만 남긴다.
+        debug_log(f"중개업소 연락처 기록 실패: {e}", "WARNING")
 
     # 4) 데이터 정리
     debug_log("\n=== 4단계: 데이터 정리 실행 ===", "STEP")
