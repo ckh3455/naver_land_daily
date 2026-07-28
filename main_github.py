@@ -1069,6 +1069,13 @@ def update_brokerage_contact_sheet(sheet_service, spreadsheet_id, broker_details
         ]
 
         if not matching_indexes:
+            has_contact = any(
+                _clean_detail_value(detail.get(key))
+                for key in ("address", "office_phone", "mobile_phone")
+            )
+            if not has_contact:
+                # 상세조회 실패로 이름만 얻은 외부업소는 빈 행으로 누적하지 않는다.
+                continue
             rows.append([
                 realtor_id,
                 name,
