@@ -201,7 +201,7 @@ class BrokerContactTests(unittest.TestCase):
         self.assertEqual(output[1][6], "양아치업소")
         self.assertEqual(output[2][6], "양아치업소")
 
-    def test_unknown_broker_without_contact_is_not_appended(self):
+    def test_unknown_active_broker_without_contact_is_appended_for_review(self):
         initial = [
             ["ID", "중개업소명", "실제상호", "주소", "사무실번호", "휴대전화", "구분"],
             ["known-1", "기존업소", "미-기존", "", "", "", "압구정업소"],
@@ -213,7 +213,9 @@ class BrokerContactTests(unittest.TestCase):
             [{"id": "empty-1", "name": "연락처없는외부업소"}]
         )
         output = service.values_api.updated["body"]["values"]
-        self.assertEqual(len(output), 2)
+        self.assertEqual(len(output), 3)
+        self.assertEqual(output[2][0], "empty-1")
+        self.assertEqual(output[2][6], "외부업소")
 
     def test_external_with_five_ads_is_promoted_to_bad(self):
         initial = [
