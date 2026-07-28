@@ -642,6 +642,8 @@ class AggressiveCardScroll:
                         key: value
                         for key, value in request_headers.items()
                         if key.lower() not in blocked_headers
+                        and not key.startswith(':')
+                        and re.fullmatch(r'[!#$%&\'*+\-.^_`|~0-9A-Za-z]+', key)
                     }
                     debug_log(
                         "중개업소 상세조회 인증 준비 완료 "
