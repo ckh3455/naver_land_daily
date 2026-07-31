@@ -1,0 +1,83 @@
+#!/usr/bin/env python3
+"""기존 네이버 크롤러에 공유 드라이브 원본 보관 기능을 결합한 실행 진입점."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import traceback
+from pathlib import Path
+
+import main_github
+from drive_archive import archive_sheet_values
+
+_ARCHIVE_SUMMARY: dict = {}
+_ORIGINAL_PROCESS = main_github.process_real_estate_data
+
+
+def _process_with_archive(spreadsheet, worksheet, sheet_service, spreadsheet_id):
+    """중복처리 직전 개별 행을 확보한 뒤 기존 정리와 Drive 보관을 순차 실행한다."""
+    global _ARCHIVE_SUMMARY
+
+    # main_github.main()이 수집 검증을 통과한 뒤 개별 광고를 시트에 기록한 상태다.
+    raw_values = worksheet.get_all_values()
+
+    # 기존 중복처리·서식·업소 등록 로직을 먼저 정상 완료한다.
+    result = _ORIGINAL_PROCESS(spreadsheet, worksheet, sheet_service, spreadsheet_id)
+
+    try:
+        grouped_values = worksheet.get_all_values()
+        grouped_count = max(0, len(grouped_values) - 1)
+        _ARCHIVE_SUMMARY = archive_sheet_values(
+            raw_values,
+            grouped_count=grouped_count,
+            credentials_file="service_account.json",
+        )
+        main_github.debug_log(
+            "공유 드라이브 원본 보관 완료: "
+            f"개별 {_ARCHIVE_SUMMARY.get('raw_count', 0)}건, "
+            f"변동 {_ARCHIVE_SUMMARY.get('change_count', 0)}건",
+            "SUCCESS",
+        )
+    except Exception as exc:
+        # 원본 보관 장애가 기존 네이버 매물분석 탭 갱신까지 망가뜨리지 않도록 분리한다.
+        _ARCHIVE_SUMMARY = {
+            "status": "error",
+            "error": str(exc),
+            "traceback": traceback.format_exc(),
+        }
+        main_github.debug_log(f"공유 드라이브 원본 보관 실패: {exc}", "ERROR")
+        main_github.debug_log(_ARCHIVE_SUMMARY["traceback"], "DEBUG")
+
+    return result
+
+
+def _append_archive_summary() -> None:
+    Path("drive_archive_summary.json").write_text(
+        json.dumps(_ARCHIVE_SUMMARY, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    result_path = Path("crawling_results.json")
+    if not result_path.exists():
+        return
+    try:
+        result = json.loads(result_path.read_text(encoding="utf-8"))
+        result["drive_archive"] = _ARCHIVE_SUMMARY
+        result_path.write_text(
+            json.dumps(result, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except Exception as exc:
+        main_github.debug_log(f"실행 결과에 Drive 요약 추가 실패: {exc}", "WARNING")
+
+
+def main() -> None:
+    main_github.process_real_estate_data = _process_with_archive
+    try:
+        asyncio.run(main_github.main())
+    finally:
+        _append_archive_summary()
+
+
+if __name__ == "__main__":
+    main()
