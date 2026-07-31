@@ -11,16 +11,30 @@ from pathlib import Path
 import main_github
 from drive_archive import archive_sheet_values
 
+SOURCE_HEADERS = [
+    "단지명", "거래구분", "동", "층수", "면적", "가격",
+    "가격변동", "중복업소", "중개업소", "중개업소ID",
+    "등록일자", "방향", "특기사항", "제공", "집주인", "직거래",
+    "사진 유무", "경도", "위도", "매물번호", "인증광고",
+]
+
 _ARCHIVE_SUMMARY: dict = {}
+_CAPTURED_ROWS: list[list] = []
 _ORIGINAL_PROCESS = main_github.process_real_estate_data
+_ORIGINAL_FORMAT = main_github.format_property_data
+
+
+def _format_and_capture(prop):
+    """Google Sheets에 기록되기 전 개별 광고 행을 그대로 보관한다."""
+    row = _ORIGINAL_FORMAT(prop)
+    if row and len(row) == len(SOURCE_HEADERS):
+        _CAPTURED_ROWS.append(list(row))
+    return row
 
 
 def _process_with_archive(spreadsheet, worksheet, sheet_service, spreadsheet_id):
-    """중복처리 직전 개별 행을 확보한 뒤 기존 정리와 Drive 보관을 순차 실행한다."""
+    """기존 중복처리를 완료한 뒤 캡처한 개별 광고를 Drive에 보관한다."""
     global _ARCHIVE_SUMMARY
-
-    # main_github.main()이 수집 검증을 통과한 뒤 개별 광고를 시트에 기록한 상태다.
-    raw_values = worksheet.get_all_values()
 
     # 기존 중복처리·서식·업소 등록 로직을 먼저 정상 완료한다.
     result = _ORIGINAL_PROCESS(spreadsheet, worksheet, sheet_service, spreadsheet_id)
@@ -28,6 +42,17 @@ def _process_with_archive(spreadsheet, worksheet, sheet_service, spreadsheet_id)
     try:
         grouped_values = worksheet.get_all_values()
         grouped_count = max(0, len(grouped_values) - 1)
+
+        # 정상적으로 캡처됐다면 시트의 날짜·숫자 자동변환을 거치지 않은 원본을 사용한다.
+        # 예외적으로 캡처가 비어 있으면 현재 시트 값을 보조 수단으로 사용한다.
+        raw_values = [SOURCE_HEADERS] + list(_CAPTURED_ROWS)
+        if not _CAPTURED_ROWS:
+            main_github.debug_log(
+                "개별 광고 직접 캡처가 비어 있어 시트 원본을 대신 읽습니다.",
+                "WARNING",
+            )
+            raw_values = worksheet.get_all_values()
+
         _ARCHIVE_SUMMARY = archive_sheet_values(
             raw_values,
             grouped_count=grouped_count,
@@ -72,6 +97,7 @@ def _append_archive_summary() -> None:
 
 
 def main() -> None:
+    main_github.format_property_data = _format_and_capture
     main_github.process_real_estate_data = _process_with_archive
     try:
         asyncio.run(main_github.main())
