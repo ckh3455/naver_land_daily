@@ -40,7 +40,7 @@ def _process_with_archive(spreadsheet, worksheet, sheet_service, spreadsheet_id)
             "SUCCESS",
         )
     except Exception as exc:
-        # 원본 보관 장애가 기존 네이버 매물분석 탭 갱신까지 망가뜨리지 않도록 분리한다.
+        # 시트 갱신 결과는 보존하되, Actions에서는 보관 실패를 명확히 오류로 표시한다.
         _ARCHIVE_SUMMARY = {
             "status": "error",
             "error": str(exc),
@@ -77,6 +77,12 @@ def main() -> None:
         asyncio.run(main_github.main())
     finally:
         _append_archive_summary()
+
+    if _ARCHIVE_SUMMARY.get("status") == "error":
+        raise RuntimeError(
+            "네이버 매물 시트 갱신은 완료됐지만 공유 드라이브 원본 보관에 실패했습니다: "
+            + _ARCHIVE_SUMMARY.get("error", "알 수 없는 오류")
+        )
 
 
 if __name__ == "__main__":
