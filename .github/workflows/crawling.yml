@@ -25,6 +25,11 @@ jobs:
       PYTHONIOENCODING: "utf-8"
       MIN_SUCCESSFUL_COMPLEXES: "23"
       MIN_TOTAL_PROPERTIES: "100"
+      NAVER_SHARED_DRIVE_ID: "0APa-MWwUseXzUk9PVA"
+      NAVER_RAW_FOLDER_ID: "1VaNfmXUvStoyEy3ky11GwJ2Y8U5v97eb"
+      NAVER_OFFICIAL_FOLDER_ID: "1jICqHFCLXwE0mFI7u4KV89IslIhxtBkA"
+      NAVER_CHANGE_FOLDER_ID: "1n--RaXCyjz8RAovf9uwtKabUIKj50wZl"
+      NAVER_LOG_FOLDER_ID: "17lQp0aXVfmAuqM14GmkgBPvtfjA_t0UN"
 
     steps:
       - name: 코드 체크아웃
@@ -77,6 +82,14 @@ jobs:
             Write-Host "필수 패키지가 이미 설치되어 있어 설치를 생략합니다."
           }
 
+      - name: 보관 코드 사전 검증
+        shell: powershell
+        run: |
+          & $env:PYTHON_EXE -m py_compile main_github.py drive_archive.py main_with_archive.py test_drive_archive.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $env:PYTHON_EXE -c "from test_drive_archive import test_price_parsing_and_classification, test_filter_and_changes; test_price_parsing_and_classification(); test_filter_and_changes(); print('Drive archive tests passed')"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Chromium 확인
         shell: powershell
         run: |
@@ -101,10 +114,10 @@ jobs:
             (New-Object System.Text.UTF8Encoding($false))
           )
 
-      - name: 크롤링 및 데이터 정리
+      - name: 크롤링·데이터 정리·공유 드라이브 보관
         shell: powershell
         run: |
-          & $env:PYTHON_EXE main_github.py
+          & $env:PYTHON_EXE main_with_archive.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: 실행 결과 업로드
@@ -112,7 +125,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: crawling-results-${{ github.run_number }}
-          path: crawling_results.json
+          path: |
+            crawling_results.json
+            drive_archive_summary.json
           if-no-files-found: warn
           retention-days: 30
 
