@@ -32,8 +32,13 @@ RAW_FOLDER_ID = os.getenv("NAVER_RAW_FOLDER_ID", "1VaNfmXUvStoyEy3ky11GwJ2Y8U5v9
 OFFICIAL_FOLDER_ID = os.getenv("NAVER_OFFICIAL_FOLDER_ID", "1jICqHFCLXwE0mFI7u4KV89IslIhxtBkA")
 CHANGE_FOLDER_ID = os.getenv("NAVER_CHANGE_FOLDER_ID", "1n--RaXCyjz8RAovf9uwtKabUIKj50wZl")
 LOG_FOLDER_ID = os.getenv("NAVER_LOG_FOLDER_ID", "17lQp0aXVfmAuqM14GmkgBPvtfjA_t0UN")
+SOURCE_LISTING_SPREADSHEET_ID = os.getenv(
+    "SOURCE_LISTING_SPREADSHEET_ID",
+    "1QP56lm5kPBdsUhrgcgY2U-JdmukXIkKCSxefd1QExKE",
+)
 
 TREND_SHEET_NAME = "광고동향"
+TREND_LAST_COLUMN = "AG"
 TREND_HEADERS = [
     "기준일", "구역", "단지명", "거래구분", "면적", "동", "층표시",
     "표시조건군ID", "광고수", "전일광고수", "광고수증감", "업소수",
@@ -41,7 +46,20 @@ TREND_HEADERS = [
     "최저가(억)", "전일최저가(억)", "최저가증감(억)", "10%가격(억)",
     "중앙가(억)", "전일중앙가(억)", "중앙가증감(억)", "방향",
     "최빈가(억)", "최고가(억)", "집주인광고",
+    "평형", "거래참고일", "거래참고가(억)", "거래연결", "판단여부", "거래비고",
 ]
+
+NOMINAL_PYEONG_BY_COMPLEX_DONG = {
+    ("미성2차", dong): "32평" for dong in ("24", "28", "29")
+} | {
+    ("미성2차", dong): "47평" for dong in ("23", "25")
+} | {
+    ("미성2차", dong): "56평" for dong in ("21", "22", "26", "27")
+} | {
+    ("현대1,2차", dong): "54평" for dong in ("20", "21", "22", "23")
+} | {
+    ("신현대", "126"): "35평",
+}
 
 ZONE_BY_COMPLEX = {
     "미성1차": "1구역",
@@ -210,6 +228,138 @@ def normalize_floor_display(value: str) -> str:
     return f"{label}/{total}"
 
 
+def _dong_number(value: str) -> str:
+    return re.sub(r"동$", "", normalize_dong_display(value))
+
+
+def nominal_pyeong(complex_name: str, area: str, dong: str) -> str:
+    """광고의 단지·동·공급면적으로 통상 평형을 보수적으로 정규화한다."""
+    dong_no = _dong_number(dong)
+    explicit = NOMINAL_PYEONG_BY_COMPLEX_DONG.get((_safe_text(complex_name), dong_no))
+    if explicit:
+        return explicit
+    if _safe_text(complex_name) == "대림빌라트":
+        return "76평"
+    match = re.match(r"([0-9.]+)", normalize_area_display(area))
+    if not match:
+        return ""
+    # 명시 매핑이 없는 경우에만 공급면적 환산값을 사용한다. 거래 연결은
+    # 같은 평형 표기가 실제 거래내역에도 있을 때만 이뤄진다.
+    return f"{round(float(match.group(1)) / 3.3058)}평"
+
+
+def _parse_transaction_date(value: str) -> datetime | None:
+    text = _safe_text(value)
+    if not text:
+        return None
+    for fmt in ("%Y-%m-%d", "%Y.%m.%d", "%y.%m.%d", "%Y/%m/%d", "%y/%m/%d"):
+        try:
+            parsed = datetime.strptime(text, fmt)
+            return parsed.replace(tzinfo=KST)
+        except ValueError:
+            continue
+    return None
+
+
+def _transaction_price_eok(value: str) -> float | str:
+    text = _safe_text(value).replace(",", "")
+    if not text:
+        return ""
+    if "억" in text:
+        price, monthly = parse_price(text)
+        return _to_eok(price) if price is not None and monthly is None else ""
+    try:
+        return round(float(text), 4)
+    except ValueError:
+        return ""
+
+
+def _floor_number(value: str, *, transaction: bool = False) -> int | None:
+    text = re.sub(r"\s+", "", _safe_text(value))
+    if not text:
+        return None
+    floor_match = re.search(r"(\d+)층", text)
+    if floor_match:
+        return int(floor_match.group(1))
+    if transaction and text.isdigit():
+        number = int(text)
+        return number // 100 if number >= 100 else number
+    first = text.split("/", 1)[0]
+    return int(first) if first.isdigit() else None
+
+
+def _floor_band_matches(ad_floor: str, transaction_floor: int | None) -> bool:
+    if transaction_floor is None:
+        return False
+    normalized = normalize_floor_display(ad_floor)
+    label = normalized.split("/", 1)[0]
+    total_match = re.search(r"/(\d+)층$", normalized)
+    if label not in {"저층", "중층", "고층"} or not total_match:
+        return False
+    total = int(total_match.group(1))
+    if label == "저층":
+        return transaction_floor <= max(1, total // 3)
+    if label == "고층":
+        return transaction_floor > (total * 2) // 3
+    return total // 3 < transaction_floor <= (total * 2) // 3
+
+
+def _transaction_is_uncertain(row: dict[str, str]) -> bool:
+    notes = " ".join(_safe_text(row.get(name)) for name in ("비고", "내용"))
+    return any(token in notes for token in (
+        "거래취소", "파기", "취소", "정확한 금액", "추정", "확인안되",
+    ))
+
+
+def transaction_reference(
+    complex_name: str,
+    pyeong: str,
+    dong: str,
+    floor: str,
+    transaction_rows: Iterable[dict[str, str]],
+    now: datetime,
+) -> list[Any]:
+    """최근 거래를 연결하되 표시조건군을 실제 매물로 단정하지 않는다."""
+    if not pyeong:
+        return ["", "", "", "거래자료 없음", ""]
+    candidates: list[tuple[int, datetime, dict[str, str], str]] = []
+    ad_dong = _dong_number(dong)
+    ad_floor = _floor_number(floor)
+    for row in transaction_rows:
+        if _safe_text(row.get("단지")) != complex_name or _safe_text(row.get("평형")) != pyeong:
+            continue
+        sold_at = _parse_transaction_date(row.get("날짜", "") or row.get("거래일", ""))
+        if sold_at is None or sold_at.date() > now.date():
+            continue
+        sold_floor = _floor_number(row.get("호", ""), transaction=True)
+        same_dong = _dong_number(row.get("동", "")) == ad_dong and bool(ad_dong)
+        exact_floor = ad_floor is not None and sold_floor == ad_floor
+        band_match = _floor_band_matches(floor, sold_floor)
+        if same_dong and exact_floor:
+            rank, link = 3, "동·정확층 일치"
+        elif same_dong and band_match:
+            rank, link = 2, "동·층구간 호환"
+        elif same_dong:
+            rank, link = 2, "동 일치"
+        else:
+            rank, link = 1, "동일 단지·평형"
+        candidates.append((rank, sold_at, row, link))
+    if not candidates:
+        return ["", "", "", "거래자료 없음", ""]
+    rank, sold_at, row, link = max(candidates, key=lambda item: (item[0], item[1]))
+    uncertain = _transaction_is_uncertain(row)
+    if uncertain:
+        judgment = "검토 필요(거래 불확실)"
+    elif rank == 3:
+        judgment = "매각연결 유력"
+    elif rank == 2:
+        judgment = "매각가능성 참고"
+    else:
+        judgment = "평형시세 참고"
+    note = " / ".join(filter(None, (_safe_text(row.get("비고")), _safe_text(row.get("내용")))))
+    return [sold_at.strftime("%Y-%m-%d"), _transaction_price_eok(row.get("금액", "")), link, judgment, note]
+
+
 def display_group_key(row: dict[str, str]) -> tuple[str, str, str, str, str]:
     """실제 매물 추정 없이 광고에 표시된 조건만으로 묶는 키."""
     return (
@@ -282,11 +432,16 @@ def build_ad_trend_rows(
     previous_rows: Iterable[dict[str, str]],
     current_rows: Iterable[dict[str, str]],
     now: datetime,
+    transaction_rows: Iterable[dict[str, str]] = (),
 ) -> list[list[Any]]:
-    """표시조건군별 광고수와 가격분포를 전일과 비교한 일별 행을 만든다."""
+    """전일 대비 변화가 생긴 표시조건군만 일별 행으로 만든다."""
     previous = _group_metrics(previous_rows)
     current = _group_metrics(current_rows)
     output: list[list[Any]] = []
+
+    # 첫 수집일은 비교 기준을 만드는 날이다. 전체 광고를 '변화'로 기록하지 않는다.
+    if not previous:
+        return output
 
     def sort_key(key: tuple[str, str, str, str, str]):
         complex_name, _, area, dong, floor = key
@@ -323,10 +478,27 @@ def build_ad_trend_rows(
         old_middle = float(median(old_prices)) if old_prices else None
         min_delta = minimum - old_minimum if minimum is not None and old_minimum is not None else None
         middle_delta = middle - old_middle if middle is not None and old_middle is not None else None
+        new_count = len(current_ids - previous_ids)
+        missing_count = len(previous_ids - current_ids)
+        changed = any((
+            len(current_ids) != len(previous_ids),
+            new_count,
+            missing_count,
+            lowered,
+            raised,
+            min_delta not in (None, 0),
+            middle_delta not in (None, 0),
+        ))
+        if not changed:
+            continue
         direction = "▼" if middle_delta is not None and middle_delta < 0 else (
             "▲" if middle_delta is not None and middle_delta > 0 else "―"
         )
         group_id = "|".join(key)
+        pyeong = nominal_pyeong(complex_name, area, dong)
+        transaction = transaction_reference(
+            complex_name, pyeong, dong, floor, transaction_rows, now,
+        )
 
         output.append([
             now.strftime("%Y-%m-%d"),
@@ -341,8 +513,8 @@ def build_ad_trend_rows(
             len(previous_ids),
             len(current_ids) - len(previous_ids),
             len(group["brokers"]),
-            len(current_ids - previous_ids),
-            len(previous_ids - current_ids),
+            new_count,
+            missing_count,
             lowered,
             raised,
             _to_eok(minimum),
@@ -356,6 +528,8 @@ def build_ad_trend_rows(
             _to_eok(_price_mode(prices)),
             _to_eok(max(prices) if prices else None),
             group["owners"],
+            pyeong,
+            *transaction,
         ])
     return output
 
@@ -515,6 +689,20 @@ def _ensure_trend_sheet(sheet_service, spreadsheet_id: str) -> int:
     for sheet in metadata.get("sheets", []):
         props = sheet.get("properties", {})
         if props.get("title") == TREND_SHEET_NAME:
+            column_count = int(props.get("gridProperties", {}).get("columnCount", 0))
+            if column_count < len(TREND_HEADERS):
+                sheet_service.spreadsheets().batchUpdate(
+                    spreadsheetId=spreadsheet_id,
+                    body={"requests": [{
+                        "updateSheetProperties": {
+                            "properties": {
+                                "sheetId": int(props["sheetId"]),
+                                "gridProperties": {"columnCount": len(TREND_HEADERS)},
+                            },
+                            "fields": "gridProperties.columnCount",
+                        }
+                    }]},
+                ).execute()
             return int(props["sheetId"])
 
     response = sheet_service.spreadsheets().batchUpdate(
@@ -586,6 +774,32 @@ def _ensure_trend_sheet(sheet_service, spreadsheet_id: str) -> int:
                     "sheetId": sheet_id,
                     "startRowIndex": 1,
                     "endRowIndex": 200000,
+                    "startColumnIndex": 27,
+                    "endColumnIndex": 29,
+                },
+                "cell": {"userEnteredFormat": {"horizontalAlignment": "CENTER"}},
+                "fields": "userEnteredFormat.horizontalAlignment",
+            }
+        },
+        {
+            "repeatCell": {
+                "range": {
+                    "sheetId": sheet_id,
+                    "startRowIndex": 1,
+                    "endRowIndex": 200000,
+                    "startColumnIndex": 29,
+                    "endColumnIndex": 30,
+                },
+                "cell": {"userEnteredFormat": {"horizontalAlignment": "RIGHT", "numberFormat": {"type": "NUMBER", "pattern": "0.0"}}},
+                "fields": "userEnteredFormat(horizontalAlignment,numberFormat)",
+            }
+        },
+        {
+            "repeatCell": {
+                "range": {
+                    "sheetId": sheet_id,
+                    "startRowIndex": 1,
+                    "endRowIndex": 200000,
                     "startColumnIndex": 16,
                     "endColumnIndex": 23,
                 },
@@ -623,6 +837,20 @@ def _ensure_trend_sheet(sheet_service, spreadsheet_id: str) -> int:
             "updateDimensionProperties": {
                 "range": {"sheetId": sheet_id, "dimension": "COLUMNS", "startIndex": 0, "endIndex": len(TREND_HEADERS)},
                 "properties": {"pixelSize": 92},
+                "fields": "pixelSize",
+            }
+        },
+        {
+            "updateDimensionProperties": {
+                "range": {"sheetId": sheet_id, "dimension": "COLUMNS", "startIndex": 30, "endIndex": 32},
+                "properties": {"pixelSize": 145},
+                "fields": "pixelSize",
+            }
+        },
+        {
+            "updateDimensionProperties": {
+                "range": {"sheetId": sheet_id, "dimension": "COLUMNS", "startIndex": 32, "endIndex": 33},
+                "properties": {"pixelSize": 300},
                 "fields": "pixelSize",
             }
         },
@@ -678,17 +906,17 @@ def update_ad_trend_sheet(
 
     header_result = sheet_service.spreadsheets().values().get(
         spreadsheetId=spreadsheet_id,
-        range=f"'{TREND_SHEET_NAME}'!A1:AA1",
+        range=f"'{TREND_SHEET_NAME}'!A1:{TREND_LAST_COLUMN}1",
     ).execute()
     existing_header = header_result.get("values", [[]])[0]
-    if existing_header and existing_header != TREND_HEADERS:
+    if existing_header and existing_header != TREND_HEADERS and existing_header != TREND_HEADERS[:len(existing_header)]:
         raise ValueError(
             f"{TREND_SHEET_NAME} 헤더가 예상 구조와 다릅니다: {existing_header}"
         )
-    if not existing_header:
+    if existing_header != TREND_HEADERS:
         sheet_service.spreadsheets().values().update(
             spreadsheetId=spreadsheet_id,
-            range=f"'{TREND_SHEET_NAME}'!A1:AA1",
+            range=f"'{TREND_SHEET_NAME}'!A1:{TREND_LAST_COLUMN}1",
             valueInputOption="RAW",
             body={"values": [TREND_HEADERS]},
         ).execute()
@@ -710,7 +938,7 @@ def update_ad_trend_sheet(
             previous_index = index
         intervals.append((start, previous_index + 1))
         clear_ranges = [
-            f"'{TREND_SHEET_NAME}'!A{start + 1}:AA{end}"
+            f"'{TREND_SHEET_NAME}'!A{start + 1}:{TREND_LAST_COLUMN}{end}"
             for start, end in intervals
         ]
         sheet_service.spreadsheets().values().batchClear(
@@ -718,11 +946,21 @@ def update_ad_trend_sheet(
             body={"ranges": clear_ranges},
         ).execute()
 
-    trend_rows = build_ad_trend_rows(previous_rows, current_rows, now)
+    try:
+        transaction_values = sheet_service.spreadsheets().values().get(
+            spreadsheetId=SOURCE_LISTING_SPREADSHEET_ID,
+            range="'거래내역'!A:N",
+        ).execute().get("values", [])
+    except Exception as exc:
+        # 원본·변동 보관은 계속하되 거래 판단 칸만 비운다.
+        print(f"거래내역을 읽지 못해 거래 판단을 생략합니다: {exc}")
+        transaction_values = []
+    _, transaction_rows = rows_to_dicts(transaction_values)
+    trend_rows = build_ad_trend_rows(previous_rows, current_rows, now, transaction_rows)
     if trend_rows:
         sheet_service.spreadsheets().values().append(
             spreadsheetId=spreadsheet_id,
-            range=f"'{TREND_SHEET_NAME}'!A:AA",
+            range=f"'{TREND_SHEET_NAME}'!A:{TREND_LAST_COLUMN}",
             valueInputOption="RAW",
             insertDataOption="OVERWRITE",
             body={"values": trend_rows},

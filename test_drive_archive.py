@@ -8,8 +8,10 @@ from drive_archive import (
     display_group_key,
     filter_apgujeong_rows,
     normalize_floor_display,
+    nominal_pyeong,
     parse_price,
     rows_to_dicts,
+    transaction_reference,
 )
 
 
@@ -101,9 +103,9 @@ def test_display_group_trends_do_not_merge_exact_and_middle_floors():
         current,
         datetime(2026, 8, 2, tzinfo=ZoneInfo("Asia/Seoul")),
     )
-    assert len(rows) == 2
+    # 변화가 있는 '중층' 표시군만 기록하고, 그대로인 9층 표시군은 생략한다.
+    assert len(rows) == 1
     middle = next(row for row in rows if row[6] == "중층/14층")
-    exact = next(row for row in rows if row[6] == "9층/14층")
 
     assert middle[8] == 2       # 현재 광고수
     assert middle[9] == 1       # 전일 광고수
@@ -113,11 +115,6 @@ def test_display_group_trends_do_not_merge_exact_and_middle_floors():
     assert middle[22] == -2.5   # 전일 중앙가 대비
     assert middle[23] == "▼"
     assert middle[26] == 1      # 집주인광고
-
-    assert exact[8] == 1
-    assert exact[20] == 69.0
-    assert exact[23] == "―"
-
 
 def test_disappeared_display_group_is_recorded_once_with_zero_ads():
     previous = [{
@@ -136,3 +133,37 @@ def test_disappeared_display_group_is_recorded_once_with_zero_ads():
     assert rows[0][10] == -1
     assert rows[0][13] == 1
     assert rows[0][20] == ""
+
+
+def test_first_baseline_and_unchanged_groups_are_not_recorded():
+    current = [{
+        "단지명": "신현대", "거래구분": "매매", "면적": "115/108m²",
+        "동": "101동", "층수": "중/14", "가격": "70억",
+        "중개업소": "A", "중개업소ID": "a", "매물번호": "100",
+    }]
+    now = datetime(2026, 8, 2, tzinfo=ZoneInfo("Asia/Seoul"))
+    assert build_ad_trend_rows([], current, now) == []
+    assert build_ad_trend_rows(current, current, now) == []
+
+
+def test_transaction_history_is_reference_not_forced_identity():
+    now = datetime(2026, 8, 2, tzinfo=ZoneInfo("Asia/Seoul"))
+    transactions = [{
+        "구역": "2구역", "날짜": "26.07.13", "단지": "신현대",
+        "평형": "35평", "동": "101동", "호": "9층", "금액": "65",
+        "비고": "실거래등록됨", "내용": "",
+    }]
+    assert nominal_pyeong("신현대", "115/108m²", "101동") == "35평"
+    reference = transaction_reference(
+        "신현대", "35평", "101동", "중/14", transactions, now,
+    )
+    assert reference[:4] == [
+        "2026-07-13", 65.0, "동·층구간 호환", "매각가능성 참고",
+    ]
+
+    exact = transaction_reference(
+        "신현대", "35평", "101동", "9/14", transactions, now,
+    )
+    assert exact[:4] == [
+        "2026-07-13", 65.0, "동·정확층 일치", "매각연결 유력",
+    ]
