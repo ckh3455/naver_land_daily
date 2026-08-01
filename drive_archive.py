@@ -38,7 +38,7 @@ SOURCE_LISTING_SPREADSHEET_ID = os.getenv(
 )
 
 TREND_SHEET_NAME = "광고동향"
-TREND_LAST_COLUMN = "AG"
+TREND_LAST_COLUMN = "AI"
 TREND_HEADERS = [
     "기준일", "구역", "단지명", "거래구분", "면적", "동", "층표시",
     "표시조건군ID", "광고수", "전일광고수", "광고수증감", "업소수",
@@ -47,6 +47,12 @@ TREND_HEADERS = [
     "중앙가(억)", "전일중앙가(억)", "중앙가증감(억)", "방향",
     "최빈가(억)", "최고가(억)", "집주인광고",
     "평형", "거래참고일", "거래참고가(억)", "거래연결", "판단여부", "거래비고",
+    "신호원천", "신호가중치",
+]
+
+SOURCE_LISTING_SNAPSHOT_HEADERS = [
+    "평형대", "구역", "단지명", "평형", "동", "층/호", "층수", "가격",
+    "수정일", "등록일", "부동산", "상태",
 ]
 
 NOMINAL_PYEONG_BY_COMPLEX_DONG = {
@@ -360,6 +366,119 @@ def transaction_reference(
     return [sold_at.strftime("%Y-%m-%d"), _transaction_price_eok(row.get("금액", "")), link, judgment, note]
 
 
+def sanitize_source_listing_rows(rows: Iterable[dict[str, str]]) -> list[dict[str, str]]:
+    """원부동산 매물장에서 가격 추적에 필요한 비민감 필드만 남긴다."""
+    sanitized: list[dict[str, str]] = []
+    for row in rows:
+        if not _safe_text(row.get("단지명")) or not _safe_text(row.get("평형")):
+            continue
+        item = {header: _safe_text(row.get(header)) for header in SOURCE_LISTING_SNAPSHOT_HEADERS}
+        sanitized.append(item)
+    return sanitized
+
+
+def _source_listing_key(row: dict[str, str]) -> tuple[str, str, str, str, str]:
+    floor_or_unit = _safe_text(row.get("층/호")) or _safe_text(row.get("층수"))
+    return (
+        _safe_text(row.get("단지명")),
+        _safe_text(row.get("평형")),
+        normalize_dong_display(row.get("동", "")),
+        floor_or_unit,
+        _safe_text(row.get("등록일")),
+    )
+
+
+def _source_zone(value: str, complex_name: str) -> str:
+    text = _safe_text(value)
+    if re.fullmatch(r"\d+", text):
+        return f"{text}구역"
+    return text or ZONE_BY_COMPLEX.get(complex_name, "기타")
+
+
+def build_source_listing_trend_rows(
+    previous_rows: Iterable[dict[str, str]],
+    current_rows: Iterable[dict[str, str]],
+    now: datetime,
+    transaction_rows: Iterable[dict[str, str]] = (),
+) -> list[list[Any]]:
+    """내부 실매물의 가격·상태 변화를 고신뢰 신호로 만든다."""
+    previous = {_source_listing_key(row): row for row in previous_rows}
+    current = {_source_listing_key(row): row for row in current_rows}
+    if not previous:
+        return []
+    transactions = list(transaction_rows)
+    output: list[list[Any]] = []
+
+    for key in sorted(set(previous) | set(current)):
+        old = previous.get(key)
+        new = current.get(key)
+        source = new or old or {}
+        old_status = _safe_text((old or {}).get("상태"))
+        new_status = _safe_text((new or {}).get("상태"))
+        old_active = old_status == "활성"
+        new_active = new_status == "활성"
+        old_price = _transaction_price_eok((old or {}).get("가격", ""))
+        new_price = _transaction_price_eok((new or {}).get("가격", ""))
+        price_delta = (
+            round(float(new_price) - float(old_price), 4)
+            if old_price != "" and new_price != "" else None
+        )
+
+        event = ""
+        weight = 3.0
+        if old and new and price_delta not in (None, 0):
+            event = "실매물 가격인하" if price_delta < 0 else "실매물 가격인상"
+        elif old and new and old_status != new_status:
+            event = f"실매물 {new_status or '상태변경'}"
+            weight = 2.5
+        elif not old and new_active:
+            event = "실매물 신규"
+            weight = 2.5
+        elif old_active and not new:
+            event = "실매물 미노출"
+            weight = 2.5
+        if not event:
+            continue
+
+        complex_name = _safe_text(source.get("단지명"))
+        pyeong = _safe_text(source.get("평형"))
+        dong = normalize_dong_display(source.get("동", ""))
+        floor = _safe_text(source.get("층/호")) or normalize_floor_display(source.get("층수", ""))
+        zone = _source_zone(source.get("구역", ""), complex_name)
+        current_count = 1 if new_active else 0
+        previous_count = 1 if old_active else 0
+        lowered = 1 if price_delta is not None and price_delta < 0 else 0
+        raised = 1 if price_delta is not None and price_delta > 0 else 0
+        direction = "▼" if lowered else ("▲" if raised else "―")
+        transaction = transaction_reference(
+            complex_name, pyeong, dong, floor, transactions, now,
+        )
+        internal_note = " / ".join(filter(None, (
+            f"수정일 {_safe_text(source.get('수정일'))}" if _safe_text(source.get("수정일")) else "",
+            f"상태 {old_status or '-'}→{new_status or '-'}" if old_status != new_status else "",
+            f"부동산 {_safe_text(source.get('부동산'))}" if _safe_text(source.get("부동산")) else "",
+        )))
+        transaction_note = _safe_text(transaction[4])
+        note = " / ".join(filter(None, (internal_note, transaction_note)))
+        judgment = f"{event}(최우선 신호)" if weight == 3.0 else event
+        group_id = "원부동|" + "|".join(key)
+
+        output.append([
+            now.strftime("%Y-%m-%d"), zone, complex_name, "매매", "", dong, floor,
+            group_id, current_count, previous_count, current_count - previous_count,
+            1 if _safe_text(source.get("부동산")) else 0,
+            1 if event == "실매물 신규" else 0,
+            1 if event == "실매물 미노출" or (old_active and not new_active) else 0,
+            lowered, raised,
+            new_price, old_price, price_delta if price_delta is not None else "",
+            new_price, new_price, old_price, price_delta if price_delta is not None else "",
+            direction, new_price, new_price, 0,
+            pyeong, transaction[0], transaction[1], transaction[2], judgment, note,
+            "원부동매물장", weight,
+        ])
+    return output
+
+
 def display_group_key(row: dict[str, str]) -> tuple[str, str, str, str, str]:
     """실제 매물 추정 없이 광고에 표시된 조건만으로 묶는 키."""
     return (
@@ -433,15 +552,15 @@ def build_ad_trend_rows(
     current_rows: Iterable[dict[str, str]],
     now: datetime,
     transaction_rows: Iterable[dict[str, str]] = (),
+    source_previous_rows: Iterable[dict[str, str]] = (),
+    source_current_rows: Iterable[dict[str, str]] = (),
 ) -> list[list[Any]]:
     """전일 대비 변화가 생긴 표시조건군만 일별 행으로 만든다."""
     previous = _group_metrics(previous_rows)
     current = _group_metrics(current_rows)
     output: list[list[Any]] = []
 
-    # 첫 수집일은 비교 기준을 만드는 날이다. 전체 광고를 '변화'로 기록하지 않는다.
-    if not previous:
-        return output
+    transactions = list(transaction_rows)
 
     def sort_key(key: tuple[str, str, str, str, str]):
         complex_name, _, area, dong, floor = key
@@ -450,7 +569,9 @@ def build_ad_trend_rows(
 
     # 오늘 완전히 사라진 표시조건군도 광고수 0으로 하루 기록해
     # 표시조건군의 소멸을 누락하지 않는다.
-    for key in sorted(set(current) | set(previous), key=sort_key):
+    # 네이버 첫 수집일은 비교 기준만 만들고 전체 광고를 신규로 기록하지 않는다.
+    naver_keys = set(current) | set(previous) if previous else set()
+    for key in sorted(naver_keys, key=sort_key):
         complex_name, trade_type, area, dong, floor = key
         group = current.get(key, {"rows": {}, "brokers": set(), "prices": [], "owners": 0})
         old = previous.get(key, {"rows": {}, "brokers": set(), "prices": [], "owners": 0})
@@ -497,7 +618,7 @@ def build_ad_trend_rows(
         group_id = "|".join(key)
         pyeong = nominal_pyeong(complex_name, area, dong)
         transaction = transaction_reference(
-            complex_name, pyeong, dong, floor, transaction_rows, now,
+            complex_name, pyeong, dong, floor, transactions, now,
         )
 
         output.append([
@@ -530,7 +651,12 @@ def build_ad_trend_rows(
             group["owners"],
             pyeong,
             *transaction,
+            "네이버광고",
+            1.0,
         ])
+    output.extend(build_source_listing_trend_rows(
+        source_previous_rows, source_current_rows, now, transactions,
+    ))
     return output
 
 
@@ -681,6 +807,16 @@ def _sheets_service(credentials_file: str = "service_account.json"):
     return build("sheets", "v4", credentials=credentials, cache_discovery=False)
 
 
+def _load_source_listing_rows(credentials_file: str = "service_account.json") -> list[dict[str, str]]:
+    sheet_service = _sheets_service(credentials_file)
+    values = sheet_service.spreadsheets().values().get(
+        spreadsheetId=SOURCE_LISTING_SPREADSHEET_ID,
+        range="'매매물건 목록'!A:V",
+    ).execute().get("values", [])
+    _, rows = rows_to_dicts(values)
+    return sanitize_source_listing_rows(rows)
+
+
 def _ensure_trend_sheet(sheet_service, spreadsheet_id: str) -> int:
     metadata = sheet_service.spreadsheets().get(
         spreadsheetId=spreadsheet_id,
@@ -774,6 +910,32 @@ def _ensure_trend_sheet(sheet_service, spreadsheet_id: str) -> int:
                     "sheetId": sheet_id,
                     "startRowIndex": 1,
                     "endRowIndex": 200000,
+                    "startColumnIndex": 33,
+                    "endColumnIndex": 34,
+                },
+                "cell": {"userEnteredFormat": {"horizontalAlignment": "CENTER"}},
+                "fields": "userEnteredFormat.horizontalAlignment",
+            }
+        },
+        {
+            "repeatCell": {
+                "range": {
+                    "sheetId": sheet_id,
+                    "startRowIndex": 1,
+                    "endRowIndex": 200000,
+                    "startColumnIndex": 34,
+                    "endColumnIndex": 35,
+                },
+                "cell": {"userEnteredFormat": {"horizontalAlignment": "CENTER", "numberFormat": {"type": "NUMBER", "pattern": "0.0"}}},
+                "fields": "userEnteredFormat(horizontalAlignment,numberFormat)",
+            }
+        },
+        {
+            "repeatCell": {
+                "range": {
+                    "sheetId": sheet_id,
+                    "startRowIndex": 1,
+                    "endRowIndex": 200000,
                     "startColumnIndex": 27,
                     "endColumnIndex": 29,
                 },
@@ -842,6 +1004,13 @@ def _ensure_trend_sheet(sheet_service, spreadsheet_id: str) -> int:
         },
         {
             "updateDimensionProperties": {
+                "range": {"sheetId": sheet_id, "dimension": "COLUMNS", "startIndex": 33, "endIndex": 35},
+                "properties": {"pixelSize": 115},
+                "fields": "pixelSize",
+            }
+        },
+        {
+            "updateDimensionProperties": {
                 "range": {"sheetId": sheet_id, "dimension": "COLUMNS", "startIndex": 30, "endIndex": 32},
                 "properties": {"pixelSize": 145},
                 "fields": "pixelSize",
@@ -894,6 +1063,8 @@ def update_ad_trend_sheet(
     current_rows: Iterable[dict[str, str]],
     now: datetime,
     *,
+    source_previous_rows: Iterable[dict[str, str]] = (),
+    source_current_rows: Iterable[dict[str, str]] = (),
     credentials_file: str = "service_account.json",
 ) -> int:
     """오늘 표시조건군 행은 교체하고 과거 날짜 행은 그대로 누적한다."""
@@ -956,7 +1127,14 @@ def update_ad_trend_sheet(
         print(f"거래내역을 읽지 못해 거래 판단을 생략합니다: {exc}")
         transaction_values = []
     _, transaction_rows = rows_to_dicts(transaction_values)
-    trend_rows = build_ad_trend_rows(previous_rows, current_rows, now, transaction_rows)
+    trend_rows = build_ad_trend_rows(
+        previous_rows,
+        current_rows,
+        now,
+        transaction_rows,
+        source_previous_rows,
+        source_current_rows,
+    )
     if trend_rows:
         sheet_service.spreadsheets().values().append(
             spreadsheetId=spreadsheet_id,
@@ -1042,6 +1220,33 @@ def _list_previous_official_files(drive, today: str) -> list[dict[str, Any]]:
     return sorted(candidates, key=lambda item: item["snapshot_date"], reverse=True)
 
 
+def _list_previous_source_listing_files(drive, today: str) -> list[dict[str, Any]]:
+    query = (
+        f"'{OFFICIAL_FOLDER_ID}' in parents and trashed = false and "
+        "name contains 'wonbudongsan_sales_official_'"
+    )
+    response = drive.files().list(
+        q=query,
+        fields="files(id,name,createdTime,modifiedTime)",
+        supportsAllDrives=True,
+        includeItemsFromAllDrives=True,
+        corpora="drive",
+        driveId=SHARED_DRIVE_ID,
+        pageSize=1000,
+    ).execute()
+    candidates = []
+    for item in response.get("files", []):
+        match = re.fullmatch(
+            r"wonbudongsan_sales_official_(\d{4}-\d{2}-\d{2})\.csv\.gz",
+            item.get("name", ""),
+        )
+        if match and match.group(1) < today:
+            item = dict(item)
+            item["snapshot_date"] = match.group(1)
+            candidates.append(item)
+    return sorted(candidates, key=lambda item: item["snapshot_date"], reverse=True)
+
+
 def _download_file(drive, file_id: str, destination: Path) -> None:
     from googleapiclient.http import MediaIoBaseDownload
 
@@ -1098,6 +1303,15 @@ def archive_sheet_values(
     drive = _drive_service(credentials_file)
     previous_rows: list[dict[str, str]] = []
     previous_name = ""
+    source_previous_rows: list[dict[str, str]] = []
+    source_previous_name = ""
+    try:
+        source_current_rows = _load_source_listing_rows(credentials_file)
+        source_available = bool(source_current_rows)
+    except Exception as exc:
+        print(f"원부동산 매매물건 목록을 읽지 못해 내부 실매물 추적을 생략합니다: {exc}")
+        source_current_rows = []
+        source_available = False
 
     with tempfile.TemporaryDirectory(prefix="naver_archive_") as tmp:
         tmp_dir = Path(tmp)
@@ -1109,6 +1323,15 @@ def archive_sheet_values(
             _download_file(drive, previous_file["id"], previous_path)
             previous_rows = _read_csv_gz(previous_path)
 
+        if source_available:
+            source_previous_files = _list_previous_source_listing_files(drive, today)
+            if source_previous_files:
+                source_previous_file = source_previous_files[0]
+                source_previous_name = source_previous_file["name"]
+                source_previous_path = tmp_dir / source_previous_name
+                _download_file(drive, source_previous_file["id"], source_previous_path)
+                source_previous_rows = _read_csv_gz(source_previous_path)
+
         metadata_rows = _with_metadata(current_rows, now, runner, run_type)
         archive_headers = META_HEADERS + headers
         raw_name = f"apgujeong_raw_{stamp}_{runner}_{run_id}.csv.gz"
@@ -1116,14 +1339,24 @@ def archive_sheet_values(
         current_name = "apgujeong_current.csv.gz"
         changes_name = f"apgujeong_changes_{today}.csv.gz"
         log_name = f"run_{stamp}_{runner}_{run_id}.json"
+        source_raw_name = f"wonbudongsan_sales_raw_{stamp}_{runner}_{run_id}.csv.gz"
+        source_official_name = f"wonbudongsan_sales_official_{today}.csv.gz"
+        source_current_name = "wonbudongsan_sales_current.csv.gz"
 
         raw_path = tmp_dir / raw_name
         official_path = tmp_dir / official_name
         changes_path = tmp_dir / changes_name
         log_path = tmp_dir / log_name
+        source_raw_path = tmp_dir / source_raw_name
+        source_official_path = tmp_dir / source_official_name
 
         _write_csv_gz(raw_path, archive_headers, metadata_rows)
         _write_csv_gz(official_path, archive_headers, metadata_rows)
+        if source_available:
+            source_metadata_rows = _with_metadata(source_current_rows, now, runner, run_type)
+            source_archive_headers = META_HEADERS + SOURCE_LISTING_SNAPSHOT_HEADERS
+            _write_csv_gz(source_raw_path, source_archive_headers, source_metadata_rows)
+            _write_csv_gz(source_official_path, source_archive_headers, source_metadata_rows)
 
         change_rows = build_change_events(previous_rows, current_rows, now, previous_name)
         _write_csv_gz(changes_path, CHANGE_HEADERS, change_rows)
@@ -1144,11 +1377,27 @@ def archive_sheet_values(
             drive, changes_path, CHANGE_FOLDER_ID, changes_name,
             replace=True, mime_type="application/gzip",
         )
+        source_raw_upload = source_official_upload = source_current_upload = None
+        if source_available:
+            source_raw_upload = _upload_file(
+                drive, source_raw_path, RAW_FOLDER_ID, source_raw_name,
+                replace=False, mime_type="application/gzip",
+            )
+            source_official_upload = _upload_file(
+                drive, source_official_path, OFFICIAL_FOLDER_ID, source_official_name,
+                replace=True, mime_type="application/gzip",
+            )
+            source_current_upload = _upload_file(
+                drive, source_official_path, OFFICIAL_FOLDER_ID, source_current_name,
+                replace=True, mime_type="application/gzip",
+            )
 
         trend_count = update_ad_trend_sheet(
             previous_rows,
             current_rows,
             now,
+            source_previous_rows=source_previous_rows,
+            source_current_rows=source_current_rows,
             credentials_file=credentials_file,
         )
 
@@ -1164,6 +1413,8 @@ def archive_sheet_values(
             "raw_count": len(current_rows),
             "grouped_count": grouped_count,
             "previous_official": previous_name or None,
+            "source_listing_count": len(source_current_rows),
+            "source_previous_official": source_previous_name or None,
             "change_count": len(change_rows),
             "trend_group_count": trend_count,
             "event_counts": event_counts,
@@ -1174,6 +1425,12 @@ def archive_sheet_values(
                 "changes": {"id": change_upload.get("id"), "name": changes_name},
             },
         }
+        if source_available:
+            summary["files"].update({
+                "source_raw": {"id": source_raw_upload.get("id"), "name": source_raw_name},
+                "source_official": {"id": source_official_upload.get("id"), "name": source_official_name},
+                "source_current": {"id": source_current_upload.get("id"), "name": source_current_name},
+            })
         log_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
         log_upload = _upload_file(
             drive, log_path, LOG_FOLDER_ID, log_name,

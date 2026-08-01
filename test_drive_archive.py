@@ -3,6 +3,7 @@ from zoneinfo import ZoneInfo
 
 from drive_archive import (
     build_ad_trend_rows,
+    build_source_listing_trend_rows,
     build_change_events,
     classify_price_change,
     display_group_key,
@@ -11,6 +12,7 @@ from drive_archive import (
     nominal_pyeong,
     parse_price,
     rows_to_dicts,
+    sanitize_source_listing_rows,
     transaction_reference,
 )
 
@@ -167,3 +169,29 @@ def test_transaction_history_is_reference_not_forced_identity():
     assert exact[:4] == [
         "2026-07-13", 65.0, "동·정확층 일치", "매각연결 유력",
     ]
+
+
+def test_source_listing_price_change_is_high_weight_signal():
+    previous = [{
+        "평형대": "30평형대", "구역": "2", "단지명": "신현대", "평형": "35평",
+        "동": "101", "층/호": "9층", "층수": "중", "가격": "65",
+        "수정일": "26.07.31", "등록일": "26.07.01", "부동산": "원부동산",
+        "상태": "활성", "소유자(생년)": "비저장", "상세내용": "전화번호 비저장",
+    }]
+    current = [{**previous[0], "가격": "63", "수정일": "26.08.01"}]
+    sanitized = sanitize_source_listing_rows(previous)
+    assert "소유자(생년)" not in sanitized[0]
+    assert "상세내용" not in sanitized[0]
+
+    rows = build_source_listing_trend_rows(
+        sanitized,
+        sanitize_source_listing_rows(current),
+        datetime(2026, 8, 1, tzinfo=ZoneInfo("Asia/Seoul")),
+    )
+    assert len(rows) == 1
+    row = rows[0]
+    assert len(row) == 35
+    assert row[16:19] == [63.0, 65.0, -2.0]
+    assert row[23] == "▼"
+    assert row[31] == "실매물 가격인하(최우선 신호)"
+    assert row[33:] == ["원부동매물장", 3.0]
