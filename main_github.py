@@ -85,7 +85,7 @@ def setup_google_sheets():
             scopes=['https://www.googleapis.com/auth/spreadsheets']
         )
         gc = gspread.authorize(credentials)
-        spreadsheet_id = os.environ.get('SPREADSHEET_ID', '1QP56lm5kPBdsUhrgcgY2U-JdmukXIkKCSxefd1QExKE')
+        spreadsheet_id = os.environ.get('SPREADSHEET_ID', '1FfeV5dkq7MTe443iMIYjztueWcUkv8ngsrDQmEzeTA4')
         spreadsheet = gc.open_by_key(spreadsheet_id)
 
         try:
@@ -1865,7 +1865,7 @@ async def main():
         scopes=['https://www.googleapis.com/auth/spreadsheets']
     )
     sheet_service = build('sheets', 'v4', credentials=credentials)
-    spreadsheet_id = os.environ.get('SPREADSHEET_ID', '1QP56lm5kPBdsUhrgcgY2U-JdmukXIkKCSxefd1QExKE')
+    spreadsheet_id = os.environ.get('SPREADSHEET_ID', '1FfeV5dkq7MTe443iMIYjztueWcUkv8ngsrDQmEzeTA4')
 
     # 사용자가 정리한 세 가지 분류를 모두 보존하고,
     # 구분 열의 드롭다운을 이 단계에서 즉시 적용한다.

@@ -18,8 +18,10 @@ import json
 import os
 import re
 import tempfile
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
+from statistics import median
 from typing import Any, Iterable
 from zoneinfo import ZoneInfo
 
@@ -30,6 +32,41 @@ RAW_FOLDER_ID = os.getenv("NAVER_RAW_FOLDER_ID", "1VaNfmXUvStoyEy3ky11GwJ2Y8U5v9
 OFFICIAL_FOLDER_ID = os.getenv("NAVER_OFFICIAL_FOLDER_ID", "1jICqHFCLXwE0mFI7u4KV89IslIhxtBkA")
 CHANGE_FOLDER_ID = os.getenv("NAVER_CHANGE_FOLDER_ID", "1n--RaXCyjz8RAovf9uwtKabUIKj50wZl")
 LOG_FOLDER_ID = os.getenv("NAVER_LOG_FOLDER_ID", "17lQp0aXVfmAuqM14GmkgBPvtfjA_t0UN")
+
+TREND_SHEET_NAME = "광고동향"
+TREND_HEADERS = [
+    "기준일", "구역", "단지명", "거래구분", "면적", "동", "층표시",
+    "표시조건군ID", "광고수", "전일광고수", "광고수증감", "업소수",
+    "신규광고", "미노출광고", "가격인하광고", "가격인상광고",
+    "최저가(억)", "전일최저가(억)", "최저가증감(억)", "10%가격(억)",
+    "중앙가(억)", "전일중앙가(억)", "중앙가증감(억)", "방향",
+    "최빈가(억)", "최고가(억)", "집주인광고",
+]
+
+ZONE_BY_COMPLEX = {
+    "미성1차": "1구역",
+    "미성2차": "1구역",
+    "신현대": "2구역",
+    "현대3차": "3구역",
+    "현대1,2차": "3구역",
+    "현대4차": "3구역",
+    "현대5차": "3구역",
+    "현대10,13,14차": "3구역",
+    "현대6,7차": "3구역",
+    "현대65동(대림아크로빌)": "3구역",
+    "현대빌라트": "3구역",
+    "대림빌라트": "3구역",
+    "현대8차": "4구역",
+    "한양3차": "4구역",
+    "한양4차": "4구역",
+    "한양6차": "4구역",
+    "영동한양1차": "5구역",
+    "한양2차": "5구역",
+    "한양5차": "6구역",
+    "한양7차": "6구역",
+    "한양8차": "6구역",
+    "압구정하이츠파크": "기타",
+}
 
 # 비교단지(트리마제·메이플자이·한남더힐)는 원본 장기보관 대상에서 제외한다.
 # 압구정하이츠파크는 압구정동 소재이므로 포함한다.
@@ -125,6 +162,202 @@ def parse_price(text: str) -> tuple[int | None, int | None]:
         deposit, monthly = raw.split("/", 1)
         return _parse_money_component(deposit), _parse_money_component(monthly)
     return _parse_money_component(raw), None
+
+
+def _normalize_number_text(value: str) -> str:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return _safe_text(value)
+    return str(int(number)) if number.is_integer() else str(number).rstrip("0").rstrip(".")
+
+
+def normalize_area_display(value: str) -> str:
+    """면적 표기의 공백·제곱미터 기호 차이만 정리한다."""
+    text = _safe_text(value).replace("㎡", "m²").replace(" ", "")
+    match = re.fullmatch(r"([0-9.]+)(?:/([0-9.]+))?m?²?", text)
+    if not match:
+        return text
+    first = _normalize_number_text(match.group(1))
+    second = _normalize_number_text(match.group(2)) if match.group(2) else ""
+    return f"{first}/{second}m²" if second else f"{first}m²"
+
+
+def normalize_dong_display(value: str) -> str:
+    """101, 101동처럼 같은 동 표기만 통일한다."""
+    text = re.sub(r"\s+", "", _safe_text(value))
+    if not text:
+        return ""
+    if re.fullmatch(r"\d+", text):
+        return f"{text}동"
+    return text
+
+
+def normalize_floor_display(value: str) -> str:
+    """네이버에 보이는 층 표기를 유지하면서 철자 차이만 통일한다."""
+    text = re.sub(r"\s+", "", _safe_text(value))
+    if not text:
+        return ""
+    parts = text.split("/", 1)
+    label = parts[0].replace("저층", "저").replace("중층", "중").replace("고층", "고")
+    label = {"저": "저층", "중": "중층", "고": "고층"}.get(label, label)
+    if label.isdigit():
+        label = f"{int(label)}층"
+    if len(parts) == 1:
+        return label
+    total = re.sub(r"층$", "", parts[1])
+    total = f"{int(total)}층" if total.isdigit() else parts[1]
+    return f"{label}/{total}"
+
+
+def display_group_key(row: dict[str, str]) -> tuple[str, str, str, str, str]:
+    """실제 매물 추정 없이 광고에 표시된 조건만으로 묶는 키."""
+    return (
+        _safe_text(row.get("단지명")),
+        _safe_text(row.get("거래구분")),
+        normalize_area_display(row.get("면적", "")),
+        normalize_dong_display(row.get("동", "")),
+        normalize_floor_display(row.get("층수", "")),
+    )
+
+
+def _percentile(values: list[int], fraction: float) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    if len(ordered) == 1:
+        return float(ordered[0])
+    position = (len(ordered) - 1) * fraction
+    lower = int(position)
+    upper = min(lower + 1, len(ordered) - 1)
+    weight = position - lower
+    return ordered[lower] * (1 - weight) + ordered[upper] * weight
+
+
+def _price_mode(values: list[int]) -> float | None:
+    if not values:
+        return None
+    counts = Counter(values)
+    highest = max(counts.values())
+    # 반복 가격이 전혀 없으면 '최빈가'를 억지로 만들지 않고 중앙가를 사용한다.
+    if highest == 1:
+        return float(median(values))
+    candidates = [price for price, count in counts.items() if count == highest]
+    return float(min(candidates))
+
+
+def _to_eok(value: float | int | None) -> float | str:
+    if value is None:
+        return ""
+    return round(float(value) / 10000, 4)
+
+
+def _group_metrics(rows: Iterable[dict[str, str]]) -> dict[tuple[str, str, str, str, str], dict[str, Any]]:
+    groups: dict[tuple[str, str, str, str, str], dict[str, Any]] = {}
+    for row in rows:
+        if _safe_text(row.get("거래구분")) != "매매":
+            continue
+        key = display_group_key(row)
+        article_no = _safe_text(row.get(ARTICLE_KEY)).lstrip("'")
+        if not article_no:
+            continue
+        group = groups.setdefault(key, {"rows": {}, "brokers": set(), "prices": [], "owners": 0})
+        if article_no in group["rows"]:
+            continue
+        group["rows"][article_no] = row
+        price, monthly = parse_price(row.get("가격", ""))
+        if price is not None and monthly is None:
+            group["prices"].append(price)
+        broker_id = _safe_text(row.get("중개업소ID")).lstrip("'")
+        broker_name = re.sub(r"\s+", "", _safe_text(row.get("중개업소"))).lower()
+        broker_key = f"id:{broker_id}" if broker_id else (f"name:{broker_name}" if broker_name else "")
+        if broker_key:
+            group["brokers"].add(broker_key)
+        if _safe_text(row.get("집주인")) == "집주인":
+            group["owners"] += 1
+    return groups
+
+
+def build_ad_trend_rows(
+    previous_rows: Iterable[dict[str, str]],
+    current_rows: Iterable[dict[str, str]],
+    now: datetime,
+) -> list[list[Any]]:
+    """표시조건군별 광고수와 가격분포를 전일과 비교한 일별 행을 만든다."""
+    previous = _group_metrics(previous_rows)
+    current = _group_metrics(current_rows)
+    output: list[list[Any]] = []
+
+    def sort_key(key: tuple[str, str, str, str, str]):
+        complex_name, _, area, dong, floor = key
+        zone = ZONE_BY_COMPLEX.get(complex_name, "기타")
+        return (zone, complex_name, area, dong, floor)
+
+    # 오늘 완전히 사라진 표시조건군도 광고수 0으로 하루 기록해
+    # 표시조건군의 소멸을 누락하지 않는다.
+    for key in sorted(set(current) | set(previous), key=sort_key):
+        complex_name, trade_type, area, dong, floor = key
+        group = current.get(key, {"rows": {}, "brokers": set(), "prices": [], "owners": 0})
+        old = previous.get(key, {"rows": {}, "brokers": set(), "prices": [], "owners": 0})
+        current_ids = set(group["rows"])
+        previous_ids = set(old["rows"])
+        common_ids = current_ids & previous_ids
+
+        lowered = 0
+        raised = 0
+        for article_no in common_ids:
+            old_price, old_monthly = parse_price(old["rows"][article_no].get("가격", ""))
+            new_price, new_monthly = parse_price(group["rows"][article_no].get("가격", ""))
+            if None in (old_price, new_price) or old_monthly is not None or new_monthly is not None:
+                continue
+            if new_price < old_price:
+                lowered += 1
+            elif new_price > old_price:
+                raised += 1
+
+        prices = group["prices"]
+        old_prices = old["prices"]
+        minimum = min(prices) if prices else None
+        old_minimum = min(old_prices) if old_prices else None
+        middle = float(median(prices)) if prices else None
+        old_middle = float(median(old_prices)) if old_prices else None
+        min_delta = minimum - old_minimum if minimum is not None and old_minimum is not None else None
+        middle_delta = middle - old_middle if middle is not None and old_middle is not None else None
+        direction = "▼" if middle_delta is not None and middle_delta < 0 else (
+            "▲" if middle_delta is not None and middle_delta > 0 else "―"
+        )
+        group_id = "|".join(key)
+
+        output.append([
+            now.strftime("%Y-%m-%d"),
+            ZONE_BY_COMPLEX.get(complex_name, "기타"),
+            complex_name,
+            trade_type,
+            area,
+            dong,
+            floor,
+            group_id,
+            len(current_ids),
+            len(previous_ids),
+            len(current_ids) - len(previous_ids),
+            len(group["brokers"]),
+            len(current_ids - previous_ids),
+            len(previous_ids - current_ids),
+            lowered,
+            raised,
+            _to_eok(minimum),
+            _to_eok(old_minimum),
+            _to_eok(min_delta),
+            _to_eok(_percentile(prices, 0.10)),
+            _to_eok(middle),
+            _to_eok(old_middle),
+            _to_eok(middle_delta),
+            direction,
+            _to_eok(_price_mode(prices)),
+            _to_eok(max(prices) if prices else None),
+            group["owners"],
+        ])
+    return output
 
 
 def classify_price_change(old_price: str, new_price: str) -> str:
@@ -261,6 +494,240 @@ def _drive_service(credentials_file: str = "service_account.json"):
         ],
     )
     return build("drive", "v3", credentials=credentials, cache_discovery=False)
+
+
+def _sheets_service(credentials_file: str = "service_account.json"):
+    from google.oauth2 import service_account
+    from googleapiclient.discovery import build
+
+    credentials = service_account.Credentials.from_service_account_file(
+        credentials_file,
+        scopes=["https://www.googleapis.com/auth/spreadsheets"],
+    )
+    return build("sheets", "v4", credentials=credentials, cache_discovery=False)
+
+
+def _ensure_trend_sheet(sheet_service, spreadsheet_id: str) -> int:
+    metadata = sheet_service.spreadsheets().get(
+        spreadsheetId=spreadsheet_id,
+        fields="sheets(properties(sheetId,title,gridProperties))",
+    ).execute()
+    for sheet in metadata.get("sheets", []):
+        props = sheet.get("properties", {})
+        if props.get("title") == TREND_SHEET_NAME:
+            return int(props["sheetId"])
+
+    response = sheet_service.spreadsheets().batchUpdate(
+        spreadsheetId=spreadsheet_id,
+        body={"requests": [{
+            "addSheet": {
+                "properties": {
+                    "title": TREND_SHEET_NAME,
+                    "gridProperties": {
+                        "rowCount": 200000,
+                        "columnCount": len(TREND_HEADERS),
+                        "frozenRowCount": 1,
+                    },
+                }
+            }
+        }]},
+    ).execute()
+    sheet_id = int(response["replies"][0]["addSheet"]["properties"]["sheetId"])
+    requests = [
+        {
+            "repeatCell": {
+                "range": {
+                    "sheetId": sheet_id,
+                    "startRowIndex": 0,
+                    "endRowIndex": 1,
+                    "startColumnIndex": 0,
+                    "endColumnIndex": len(TREND_HEADERS),
+                },
+                "cell": {
+                    "userEnteredFormat": {
+                        "backgroundColor": {"red": 0.92, "green": 0.92, "blue": 0.92},
+                        "textFormat": {"bold": True},
+                        "horizontalAlignment": "CENTER",
+                        "wrapStrategy": "WRAP",
+                    }
+                },
+                "fields": "userEnteredFormat",
+            }
+        },
+        {
+            "setBasicFilter": {
+                "filter": {
+                    "range": {
+                        "sheetId": sheet_id,
+                        "startRowIndex": 0,
+                        "endRowIndex": 200000,
+                        "startColumnIndex": 0,
+                        "endColumnIndex": len(TREND_HEADERS),
+                    }
+                }
+            }
+        },
+        {
+            "repeatCell": {
+                "range": {
+                    "sheetId": sheet_id,
+                    "startRowIndex": 1,
+                    "endRowIndex": 200000,
+                    "startColumnIndex": 8,
+                    "endColumnIndex": 16,
+                },
+                "cell": {"userEnteredFormat": {"horizontalAlignment": "CENTER", "numberFormat": {"type": "NUMBER", "pattern": "0"}}},
+                "fields": "userEnteredFormat(horizontalAlignment,numberFormat)",
+            }
+        },
+        {
+            "repeatCell": {
+                "range": {
+                    "sheetId": sheet_id,
+                    "startRowIndex": 1,
+                    "endRowIndex": 200000,
+                    "startColumnIndex": 16,
+                    "endColumnIndex": 23,
+                },
+                "cell": {"userEnteredFormat": {"horizontalAlignment": "RIGHT", "numberFormat": {"type": "NUMBER", "pattern": "0.0"}}},
+                "fields": "userEnteredFormat(horizontalAlignment,numberFormat)",
+            }
+        },
+        {
+            "repeatCell": {
+                "range": {
+                    "sheetId": sheet_id,
+                    "startRowIndex": 1,
+                    "endRowIndex": 200000,
+                    "startColumnIndex": 24,
+                    "endColumnIndex": 26,
+                },
+                "cell": {"userEnteredFormat": {"horizontalAlignment": "RIGHT", "numberFormat": {"type": "NUMBER", "pattern": "0.0"}}},
+                "fields": "userEnteredFormat(horizontalAlignment,numberFormat)",
+            }
+        },
+        {
+            "repeatCell": {
+                "range": {
+                    "sheetId": sheet_id,
+                    "startRowIndex": 1,
+                    "endRowIndex": 200000,
+                    "startColumnIndex": 26,
+                    "endColumnIndex": 27,
+                },
+                "cell": {"userEnteredFormat": {"horizontalAlignment": "CENTER", "numberFormat": {"type": "NUMBER", "pattern": "0"}}},
+                "fields": "userEnteredFormat(horizontalAlignment,numberFormat)",
+            }
+        },
+        {
+            "updateDimensionProperties": {
+                "range": {"sheetId": sheet_id, "dimension": "COLUMNS", "startIndex": 0, "endIndex": len(TREND_HEADERS)},
+                "properties": {"pixelSize": 92},
+                "fields": "pixelSize",
+            }
+        },
+        {
+            "updateDimensionProperties": {
+                "range": {"sheetId": sheet_id, "dimension": "COLUMNS", "startIndex": 7, "endIndex": 8},
+                "properties": {"pixelSize": 250},
+                "fields": "pixelSize",
+            }
+        },
+    ]
+    for symbol, color in (("▼", {"red": 0.85, "green": 0.05, "blue": 0.05}),
+                          ("▲", {"red": 0.05, "green": 0.25, "blue": 0.85})):
+        requests.append({
+            "addConditionalFormatRule": {
+                "rule": {
+                    "ranges": [{
+                        "sheetId": sheet_id,
+                        "startRowIndex": 1,
+                        "endRowIndex": 200000,
+                        "startColumnIndex": 23,
+                        "endColumnIndex": 24,
+                    }],
+                    "booleanRule": {
+                        "condition": {"type": "TEXT_EQ", "values": [{"userEnteredValue": symbol}]},
+                        "format": {"textFormat": {"bold": True, "foregroundColor": color}},
+                    },
+                },
+                "index": 0,
+            }
+        })
+    sheet_service.spreadsheets().batchUpdate(
+        spreadsheetId=spreadsheet_id,
+        body={"requests": requests},
+    ).execute()
+    return sheet_id
+
+
+def update_ad_trend_sheet(
+    previous_rows: Iterable[dict[str, str]],
+    current_rows: Iterable[dict[str, str]],
+    now: datetime,
+    *,
+    credentials_file: str = "service_account.json",
+) -> int:
+    """오늘 표시조건군 행은 교체하고 과거 날짜 행은 그대로 누적한다."""
+    spreadsheet_id = os.getenv(
+        "SPREADSHEET_ID",
+        "1FfeV5dkq7MTe443iMIYjztueWcUkv8ngsrDQmEzeTA4",
+    )
+    sheet_service = _sheets_service(credentials_file)
+    sheet_id = _ensure_trend_sheet(sheet_service, spreadsheet_id)
+
+    header_result = sheet_service.spreadsheets().values().get(
+        spreadsheetId=spreadsheet_id,
+        range=f"'{TREND_SHEET_NAME}'!A1:AA1",
+    ).execute()
+    existing_header = header_result.get("values", [[]])[0]
+    if existing_header and existing_header != TREND_HEADERS:
+        raise ValueError(
+            f"{TREND_SHEET_NAME} 헤더가 예상 구조와 다릅니다: {existing_header}"
+        )
+    if not existing_header:
+        sheet_service.spreadsheets().values().update(
+            spreadsheetId=spreadsheet_id,
+            range=f"'{TREND_SHEET_NAME}'!A1:AA1",
+            valueInputOption="RAW",
+            body={"values": [TREND_HEADERS]},
+        ).execute()
+
+    today = now.strftime("%Y-%m-%d")
+    date_result = sheet_service.spreadsheets().values().get(
+        spreadsheetId=spreadsheet_id,
+        range=f"'{TREND_SHEET_NAME}'!A2:A",
+    ).execute()
+    dates = [row[0] if row else "" for row in date_result.get("values", [])]
+    matching_indexes = [index + 1 for index, value in enumerate(dates) if _safe_text(value) == today]
+    if matching_indexes:
+        intervals: list[tuple[int, int]] = []
+        start = previous_index = matching_indexes[0]
+        for index in matching_indexes[1:]:
+            if index != previous_index + 1:
+                intervals.append((start, previous_index + 1))
+                start = index
+            previous_index = index
+        intervals.append((start, previous_index + 1))
+        clear_ranges = [
+            f"'{TREND_SHEET_NAME}'!A{start + 1}:AA{end}"
+            for start, end in intervals
+        ]
+        sheet_service.spreadsheets().values().batchClear(
+            spreadsheetId=spreadsheet_id,
+            body={"ranges": clear_ranges},
+        ).execute()
+
+    trend_rows = build_ad_trend_rows(previous_rows, current_rows, now)
+    if trend_rows:
+        sheet_service.spreadsheets().values().append(
+            spreadsheetId=spreadsheet_id,
+            range=f"'{TREND_SHEET_NAME}'!A:AA",
+            valueInputOption="RAW",
+            insertDataOption="OVERWRITE",
+            body={"values": trend_rows},
+        ).execute()
+    return len(trend_rows)
 
 
 def _escape_drive_query(value: str) -> str:
@@ -440,6 +907,13 @@ def archive_sheet_values(
             replace=True, mime_type="application/gzip",
         )
 
+        trend_count = update_ad_trend_sheet(
+            previous_rows,
+            current_rows,
+            now,
+            credentials_file=credentials_file,
+        )
+
         event_counts: dict[str, int] = {}
         for event in change_rows:
             name = event.get("이벤트", "")
@@ -453,6 +927,7 @@ def archive_sheet_values(
             "grouped_count": grouped_count,
             "previous_official": previous_name or None,
             "change_count": len(change_rows),
+            "trend_group_count": trend_count,
             "event_counts": event_counts,
             "files": {
                 "raw": {"id": raw_upload.get("id"), "name": raw_name},

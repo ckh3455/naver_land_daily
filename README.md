@@ -67,7 +67,7 @@
 - Name: `SPREADSHEET_ID`
 - Value: Google Sheets 스프레드시트 ID
 ```
-1QP56lm5kPBdsUhrgcgY2U-JdmukXIkKCSxefd1QExKE
+1FfeV5dkq7MTe443iMIYjztueWcUkv8ngsrDQmEzeTA4
 ```
 
 ### 4️⃣ 파일 구조

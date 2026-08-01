@@ -87,7 +87,7 @@ jobs:
         run: |
           & $env:PYTHON_EXE -m py_compile main_github.py drive_archive.py main_with_archive.py test_drive_archive.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & $env:PYTHON_EXE -c "from test_drive_archive import test_price_parsing_and_classification, test_filter_and_changes; test_price_parsing_and_classification(); test_filter_and_changes(); print('Drive archive tests passed')"
+          & $env:PYTHON_EXE -c "from test_drive_archive import test_price_parsing_and_classification, test_filter_and_changes, test_display_group_trends_do_not_merge_exact_and_middle_floors, test_disappeared_display_group_is_recorded_once_with_zero_ads; test_price_parsing_and_classification(); test_filter_and_changes(); test_display_group_trends_do_not_merge_exact_and_middle_floors(); test_disappeared_display_group_is_recorded_once_with_zero_ads(); print('Drive archive and trend tests passed')"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Chromium 확인
