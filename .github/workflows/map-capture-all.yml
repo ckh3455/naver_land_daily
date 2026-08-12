@@ -1,0 +1,76 @@
+name: 압구정 130개동 네이버 지도 고배율 전수캡처
+
+on:
+  push:
+    paths:
+      - 'map_capture_all.py'
+      - '.github/workflows/map-capture-all.yml'
+  workflow_dispatch:
+    inputs:
+      start_index:
+        description: '시작 순번 (1~130)'
+        required: false
+        default: '1'
+      end_index:
+        description: '종료 순번 (1~130)'
+        required: false
+        default: '130'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: naver-map-capture-all
+  cancel-in-progress: false
+
+jobs:
+  capture-all:
+    runs-on: [self-hosted, windows]
+    timeout-minutes: 180
+    env:
+      PYTHONUTF8: '1'
+      PYTHONIOENCODING: 'utf-8'
+      START_INDEX: ${{ github.event.inputs.start_index || '1' }}
+      END_INDEX: ${{ github.event.inputs.end_index || '130' }}
+    steps:
+      - name: 코드 체크아웃
+        uses: actions/checkout@v4
+
+      - name: Python 환경 확인
+        shell: powershell
+        run: |
+          $pythonCandidates = @(
+            'C:\Python311\python.exe',
+            'C:\ProgramData\anaconda3\python.exe'
+          )
+          $python = $pythonCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (!$python) { Write-Error '지원되는 Python을 찾을 수 없습니다.'; exit 1 }
+          "PYTHON_EXE=$python" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          & $python --version
+
+      - name: Playwright/Chromium 확인
+        shell: powershell
+        run: |
+          & $env:PYTHON_EXE -c "import playwright"
+          if ($LASTEXITCODE -ne 0) {
+            & $env:PYTHON_EXE -m pip install playwright
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          & $env:PYTHON_EXE -m playwright install chromium
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: 130개 아파트동 고배율 전수 캡처
+        shell: powershell
+        run: |
+          Write-Host "Capture range: $env:START_INDEX ~ $env:END_INDEX"
+          & $env:PYTHON_EXE map_capture_all.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: 전수 캡처 결과 업로드
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: apgujeong-130-naver-highzoom-${{ github.run_number }}
+          path: map_capture_all_artifacts/
+          if-no-files-found: warn
+          retention-days: 14
