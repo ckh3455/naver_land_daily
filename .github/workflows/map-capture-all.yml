@@ -6,15 +6,6 @@ on:
       - 'map_capture_all.py'
       - '.github/workflows/map-capture-all.yml'
   workflow_dispatch:
-    inputs:
-      start_index:
-        description: '시작 순번 (1~130)'
-        required: false
-        default: '1'
-      end_index:
-        description: '종료 순번 (1~130)'
-        required: false
-        default: '130'
 
 permissions:
   contents: read
@@ -24,14 +15,35 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  capture-all:
+  capture-batches:
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        batch:
+          - { name: '001-010', start: 1, end: 10 }
+          - { name: '011-020', start: 11, end: 20 }
+          - { name: '021-030', start: 21, end: 30 }
+          - { name: '031-040', start: 31, end: 40 }
+          - { name: '041-050', start: 41, end: 50 }
+          - { name: '051-060', start: 51, end: 60 }
+          - { name: '061-070', start: 61, end: 70 }
+          - { name: '071-080', start: 71, end: 80 }
+          - { name: '081-090', start: 81, end: 90 }
+          - { name: '091-100', start: 91, end: 100 }
+          - { name: '101-110', start: 101, end: 110 }
+          - { name: '111-120', start: 111, end: 120 }
+          - { name: '121-130', start: 121, end: 130 }
+
+    name: capture-${{ matrix.batch.name }}
     runs-on: [self-hosted, windows]
-    timeout-minutes: 180
+    timeout-minutes: 45
     env:
       PYTHONUTF8: '1'
       PYTHONIOENCODING: 'utf-8'
-      START_INDEX: ${{ github.event.inputs.start_index || '1' }}
-      END_INDEX: ${{ github.event.inputs.end_index || '130' }}
+      START_INDEX: ${{ matrix.batch.start }}
+      END_INDEX: ${{ matrix.batch.end }}
+
     steps:
       - name: 코드 체크아웃
         uses: actions/checkout@v4
@@ -59,18 +71,18 @@ jobs:
           & $env:PYTHON_EXE -m playwright install chromium
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: 130개 아파트동 고배율 전수 캡처
+      - name: 고배율 캡처 ${{ matrix.batch.name }}
         shell: powershell
         run: |
           Write-Host "Capture range: $env:START_INDEX ~ $env:END_INDEX"
           & $env:PYTHON_EXE map_capture_all.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: 전수 캡처 결과 업로드
+      - name: 묶음 캡처 결과 업로드
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: apgujeong-130-naver-highzoom-${{ github.run_number }}
+          name: apgujeong-naver-highzoom-${{ matrix.batch.name }}-${{ github.run_number }}
           path: map_capture_all_artifacts/
           if-no-files-found: warn
           retention-days: 14
