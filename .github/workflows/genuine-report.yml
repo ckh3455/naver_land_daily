@@ -1,0 +1,60 @@
+name: 미등록 진성매물 리포트
+
+# 최신 광고 원본(공유 드라이브)과 원부동산 매물장을 대조해
+# '미등록 진성매물' 탭을 갱신합니다. 크롤링이 필요 없어 클라우드에서 실행합니다.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: genuine-report
+  cancel-in-progress: false
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 패키지 설치
+        run: pip install -q google-api-python-client google-auth
+
+      - name: 단위 테스트
+        run: python -m unittest -v test_listing_match
+
+      - name: 서비스 계정 키 생성
+        env:
+          SERVICE_ACCOUNT_JSON: ${{ secrets.SERVICE_ACCOUNT_JSON }}
+        run: |
+          python - <<'EOF'
+          import os
+          data = os.environ["SERVICE_ACCOUNT_JSON"].replace("﻿", "")
+          open("service_account.json", "w", encoding="utf-8").write(data)
+          EOF
+
+      - name: 리포트 작성
+        run: python genuine_listing_report.py
+
+      - name: 결과 요약 업로드
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: genuine-report-${{ github.run_number }}
+          path: genuine_report_summary.json
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: 서비스 계정 키 삭제
+        if: always()
+        run: rm -f service_account.json
