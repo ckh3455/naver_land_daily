@@ -22,7 +22,7 @@ from typing import Any
 import drive_archive as da
 from listing_match import (
     RESULT_HEADERS, STATUS_INACTIVE, STATUS_PRICE_DIFF, STATUS_REGISTERED,
-    STATUS_UNREGISTERED, build_results,
+    STATUS_UNREGISTERED, build_broker_alias, build_results,
 )
 
 REPORT_SHEET_NAME = "미등록 진성매물"
@@ -59,6 +59,21 @@ def load_source_rows(credentials_file: str = "service_account.json") -> list[dic
     ).execute().get("values", [])
     _, rows = da.rows_to_dicts(values)
     return rows
+
+
+BROKER_ALIAS_SHEET = "압구정 중개업소 2"
+
+
+def load_broker_alias(credentials_file: str = "service_account.json",
+                      spreadsheet_id: str = SPREADSHEET_ID) -> dict[str, dict[str, str]]:
+    """'압구정 중개업소 2' 탭의 ID·중개업소명 → 실제상호 매핑."""
+    service = da._sheets_service(credentials_file)
+    values = service.spreadsheets().values().get(
+        spreadsheetId=spreadsheet_id,
+        range=f"'{BROKER_ALIAS_SHEET}'!A:G",
+    ).execute().get("values", [])
+    _, rows = da.rows_to_dicts(values)
+    return build_broker_alias(rows)
 
 
 def _ensure_sheet(service, spreadsheet_id: str, title: str, cols: int) -> int:
@@ -144,7 +159,7 @@ def write_report(results: list[list[Any]], collected: str,
                 "range": {"sheetId": sheet_id, "startRowIndex": start, "endRowIndex": index},
                 "cell": {"userEnteredFormat": cell}, "fields": fields}})
             start = index
-    widths = [90, 50, 120, 50, 60, 80, 70, 90, 50, 50, 45, 85, 85, 360, 260, 90, 200]
+    widths = [90, 50, 120, 50, 60, 120, 70, 90, 50, 50, 45, 85, 85, 240, 260, 90, 200]
     for i, width in enumerate(widths[:cols]):
         fmt.append({"updateDimensionProperties": {
             "range": {"sheetId": sheet_id, "dimension": "COLUMNS", "startIndex": i, "endIndex": i + 1},
@@ -156,9 +171,11 @@ def write_report(results: list[list[Any]], collected: str,
 def main() -> None:
     rows, collected = load_current_rows()
     source_rows = load_source_rows()
-    results = build_results(rows, source_rows)
+    alias = load_broker_alias()
+    results = build_results(rows, source_rows, broker_alias=alias)
     info = write_report(results, collected)
-    info.update({"ad_rows": len(rows), "source_rows": len(source_rows)})
+    info.update({"ad_rows": len(rows), "source_rows": len(source_rows),
+                 "alias_ids": len(alias["byId"]), "alias_names": len(alias["byName"])})
     Path("genuine_report_summary.json").write_text(
         json.dumps(info, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps(info, ensure_ascii=False, indent=2))

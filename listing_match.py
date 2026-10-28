@@ -186,8 +186,34 @@ class Ad:
     raw: dict[str, str] = field(repr=False, default_factory=dict)
 
 
-def ads_from_rows(rows: Iterable[dict[str, str]]) -> list[Ad]:
-    """중복처리 전 개별 광고 행(매매만)을 Ad 목록으로 변환한다."""
+def broker_name_key(value: str) -> str:
+    return re.sub(r"[\s()（）]+", "", _text(value)).lower()
+
+
+def build_broker_alias(rows: Iterable[dict[str, str]]) -> dict[str, dict[str, str]]:
+    """'압구정 중개업소 2' 탭(ID·중개업소명·실제상호)에서 ID/이름 → 실제상호 매핑을 만든다."""
+    by_id: dict[str, str] = {}
+    by_name: dict[str, str] = {}
+    for row in rows:
+        canon = _text(row.get("실제상호"))
+        if not canon:
+            continue
+        broker_id = _text(row.get("ID") or row.get("중개업소ID")).lstrip("'")
+        name = _text(row.get("중개업소명"))
+        if broker_id:
+            by_id.setdefault(broker_id, canon)
+        if name:
+            by_name.setdefault(broker_name_key(name), canon)
+    return {"byId": by_id, "byName": by_name}
+
+
+def ads_from_rows(rows: Iterable[dict[str, str]],
+                  broker_alias: dict[str, dict[str, str]] | None = None) -> list[Ad]:
+    """중복처리 전 개별 광고 행(매매만)을 Ad 목록으로 변환한다.
+
+    broker_alias가 있으면 업소명을 실제상호로 바꾸고, 같은 실제상호는 한 업소로 센다.
+    """
+    alias = broker_alias or {"byId": {}, "byName": {}}
     ads: list[Ad] = []
     seen: set[str] = set()
     for row in rows:
@@ -203,7 +229,13 @@ def ads_from_rows(rows: Iterable[dict[str, str]]) -> list[Ad]:
             continue
         broker_id = _text(row.get("중개업소ID")).lstrip("'")
         broker_name = _text(row.get("중개업소"))
-        broker_key = f"id:{broker_id}" if broker_id else "name:" + re.sub(r"\s+", "", broker_name)
+        canon = alias["byId"].get(broker_id) if broker_id else None
+        canon = canon or alias["byName"].get(broker_name_key(broker_name))
+        if canon:
+            broker_key = "canon:" + broker_name_key(canon)
+            broker_name = canon
+        else:
+            broker_key = f"id:{broker_id}" if broker_id else "name:" + broker_name_key(broker_name)
         if _text(row.get("집주인")) == "집주인":
             broker_key = f"owner:{article_no}"
         ads.append(Ad(
@@ -234,6 +266,20 @@ class Cluster:
     @property
     def brokers(self) -> set[str]:
         return {a.broker_key for a in self.ads}
+
+    def floor_breakdown(self) -> str:
+        """'13층(1)+고층(7)'처럼 정확층·구간 표기 광고 수를 나눠 보여준다."""
+        floor = self.floor()
+        total = f"/{floor.total}" if floor.total else ""
+        exact_n = sum(1 for a in self.ads if a.floor.exact is not None)
+        bands = Counter(a.floor.band or "층미상" for a in self.ads if a.floor.exact is None)
+        parts = []
+        if exact_n:
+            parts.append(f"{floor.exact}층({exact_n})")
+        for band, n in bands.most_common():
+            label = f"{band}층" if band in ("저", "중", "고") else band
+            parts.append(f"{label}({n})")
+        return "+".join(parts) + total
 
     @property
     def prices(self) -> list[int]:
@@ -272,32 +318,63 @@ def _can_merge(a: Cluster, b: Cluster) -> bool:
     return True
 
 
+def _greedy_cluster(members: list[Ad]) -> list[Cluster]:
+    """가격순으로 하나씩 붙이되, 붙을 수 있는 묶음 중 가격이 가장 가까운 곳에 붙인다."""
+    members = sorted(members, key=lambda a: a.price or 0)
+    local: list[Cluster] = []
+    for ad in members:
+        single = Cluster([ad])
+        best = None
+        for cand in local:
+            if _pyeong_close(cand, ad) and _can_merge(cand, single):
+                gap = abs((cand.representative_price() or 0) - (ad.price or 0))
+                if best is None or gap < best[0]:
+                    best = (gap, cand)
+        if best:
+            best[1].ads.append(ad)
+        else:
+            local.append(single)
+    return local
+
+
 def cluster_ads(ads: Iterable[Ad]) -> list[Cluster]:
-    """같은 실물로 보이는 광고를 묶는다(보수적 병합)."""
+    """같은 실물로 보이는 광고를 묶는다(보수적 병합).
+
+    1) 정확층 광고끼리 묶는다(같은 층·가격 근접).
+    2) 저/중/고 구간만 적힌 광고끼리 묶는다(같은 구간·가격 근접).
+    3) 구간 묶음은 붙을 수 있는 정확층 묶음이 '딱 하나'일 때만 합친다.
+       후보가 둘 이상이면(예: 고층 45억 ↔ 12층 46억·13층 45억) 어느 집인지
+       알 수 없으므로 따로 둔다.
+    """
     groups: dict[tuple[str, str], list[Ad]] = {}
     for ad in ads:
         groups.setdefault((ad.complex_name, ad.dong), []).append(ad)
 
     clusters: list[Cluster] = []
     for _, members in sorted(groups.items()):
-        # 정확층 광고를 먼저 씨앗으로 두고, 같은 가격순으로 붙인다.
-        members.sort(key=lambda a: (a.floor.exact is None, a.price or 0))
-        local: list[Cluster] = []
-        for ad in members:
-            single = Cluster([ad])
-            best = None
-            for cand in local:
-                if not _pyeong_close(cand, ad):
-                    continue
-                if _can_merge(cand, single):
-                    gap = abs((cand.representative_price() or 0) - (ad.price or 0))
-                    if best is None or gap < best[0]:
-                        best = (gap, cand)
-            if best:
-                best[1].ads.append(ad)
+        exact_ads = [a for a in members if a.floor.exact is not None]
+        band_ads = [a for a in members if a.floor.exact is None]
+        exact_clusters: list[Cluster] = []
+        by_floor: dict[int, list[Ad]] = {}
+        for a in exact_ads:
+            by_floor.setdefault(a.floor.exact, []).append(a)
+        for floor_ads in by_floor.values():
+            exact_clusters.extend(_greedy_cluster(floor_ads))
+        band_clusters = _greedy_cluster(band_ads)
+
+        leftover: list[Cluster] = []
+        for band_cluster in band_clusters:
+            candidates = [
+                ec for ec in exact_clusters
+                if all(_pyeong_close(ec, a) for a in band_cluster.ads)
+                and _can_merge(ec, band_cluster)
+            ]
+            if len(candidates) == 1:
+                candidates[0].ads.extend(band_cluster.ads)
             else:
-                local.append(single)
-        clusters.extend(local)
+                leftover.append(band_cluster)
+        clusters.extend(exact_clusters)
+        clusters.extend(leftover)
     return clusters
 
 
@@ -413,8 +490,9 @@ def _align_pyeong_to_source(ads: list[Ad], sources: list[SourceItem]) -> None:
 
 
 def build_results(rows: Iterable[dict[str, str]], source_rows: Iterable[dict[str, str]],
-                  min_brokers: int = MIN_BROKERS_FOR_GENUINE) -> list[list[Any]]:
-    ads = ads_from_rows(rows)
+                  min_brokers: int = MIN_BROKERS_FOR_GENUINE,
+                  broker_alias: dict[str, dict[str, str]] | None = None) -> list[list[Any]]:
+    ads = ads_from_rows(rows, broker_alias)
     sources = source_items_from_rows(source_rows)
     _align_pyeong_to_source(ads, sources)
     output: list[tuple[tuple, list[Any]]] = []
@@ -440,7 +518,7 @@ def build_results(rows: Iterable[dict[str, str]], source_rows: Iterable[dict[str
             ad0.complex_name,
             f"{pyeongs[0]}평" if pyeongs else "",
             f"{ad0.dong}동",
-            floor.label(),
+            cluster.floor_breakdown(),
             _eok(rep),
             f"{_eok(min(prices))}~{_eok(max(prices))}" if prices else "",
             len(cluster.brokers),
