@@ -64,6 +64,7 @@ def _process_with_archive(spreadsheet, worksheet, sheet_service, spreadsheet_id)
             f"변동 {_ARCHIVE_SUMMARY.get('change_count', 0)}건",
             "SUCCESS",
         )
+        _update_genuine_report(raw_values)
     except Exception as exc:
         # 시트 갱신 결과는 보존하되, Actions에서는 보관 실패를 명확히 오류로 표시한다.
         _ARCHIVE_SUMMARY = {
@@ -75,6 +76,23 @@ def _process_with_archive(spreadsheet, worksheet, sheet_service, spreadsheet_id)
         main_github.debug_log(_ARCHIVE_SUMMARY["traceback"], "DEBUG")
 
     return result
+
+
+def _update_genuine_report(raw_values: list[list]) -> None:
+    """'미등록 진성매물' 탭 갱신. 실패해도 시트 갱신·원본 보관 결과는 유지한다."""
+    try:
+        from datetime import datetime
+
+        from genuine_listing_report import run_report
+
+        headers = [str(h) for h in raw_values[0]]
+        rows = [dict(zip(headers, [str(v) for v in row])) for row in raw_values[1:]]
+        collected = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        info = run_report(rows, collected, credentials_file="service_account.json")
+        main_github.debug_log(f"미등록 진성매물 탭 갱신: {info.get('summary', '')}", "SUCCESS")
+    except Exception as exc:
+        main_github.debug_log(f"미등록 진성매물 탭 갱신 실패(크롤링 결과는 정상): {exc}", "WARNING")
+        main_github.debug_log(traceback.format_exc(), "DEBUG")
 
 
 def _append_archive_summary() -> None:

@@ -168,17 +168,24 @@ def write_report(results: list[list[Any]], collected: str,
     return {"summary": summary, "counts": dict(counts), "rows": len(results)}
 
 
-def main() -> None:
-    rows, collected = load_current_rows()
-    source_rows = load_source_rows()
-    alias = load_broker_alias()
+def run_report(rows: list[dict[str, str]], collected: str,
+               credentials_file: str = "service_account.json") -> dict[str, Any]:
+    """개별 광고 행으로 리포트를 만들어 탭에 쓰고 요약을 반환한다(크롤링 파이프라인용)."""
+    source_rows = load_source_rows(credentials_file)
+    alias = load_broker_alias(credentials_file)
     results = build_results(rows, source_rows, broker_alias=alias)
-    info = write_report(results, collected)
+    info = write_report(results, collected, credentials_file)
     info.update({"ad_rows": len(rows), "source_rows": len(source_rows),
                  "alias_ids": len(alias["byId"]), "alias_names": len(alias["byName"])})
     Path("genuine_report_summary.json").write_text(
         json.dumps(info, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(json.dumps(info, ensure_ascii=False, indent=2))
+    return info
+
+
+def main() -> None:
+    """수동 실행: 공유 드라이브의 최신 원본으로 리포트를 다시 만든다."""
+    rows, collected = load_current_rows()
+    print(json.dumps(run_report(rows, collected), ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":
