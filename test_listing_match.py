@@ -82,6 +82,16 @@ class MatchingTests(unittest.TestCase):
         result = build_results(rows, [src("3", "207", "저", "50", status="거래완료")])
         self.assertEqual(result[0][0], STATUS_INACTIVE)
 
+    def test_single_type_dong_adopts_source_pyeong(self):
+        # 96㎡ → 환산 29평이지만 매물장 205동은 32평 하나뿐 → 32평으로 보고 등록 판정
+        rows = [
+            ad("205동", "12/15", "54억", "A", "1", area="96/82m²", complex_name="현대10,13,14차"),
+            ad("205동", "12/15", "54억", "B", "2", area="96/82m²", complex_name="현대10,13,14차"),
+        ]
+        result = build_results(rows, [src("205", "1203", "고", "55", complex_name="현대14차", pyeong="32평")])
+        self.assertEqual(result[0][0], STATUS_REGISTERED)
+        self.assertEqual(result[0][3], "32평")
+
     def test_complex_alias(self):
         rows = [
             ad("206동", "10/15", "55억", "A", "1", area="106/82m²", complex_name="현대10,13,14차"),

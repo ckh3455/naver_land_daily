@@ -37,6 +37,7 @@ SOURCE_COMPLEX_ALIASES = {
 
 MIN_BROKERS_FOR_GENUINE = 2
 PYEONG_TOLERANCE = 2
+ALIGN_SINGLE_TYPE_TOLERANCE = 5
 CLUSTER_PRICE_TOLERANCE_MAN = 10000      # 같은 실물로 묶을 가격 차이(1억)
 CLUSTER_PRICE_TOLERANCE_RATIO = 0.02
 REGISTER_PRICE_TOLERANCE_MAN = 20000     # 저/중/고 표기일 때 매물장 가격 근접 판단(2억)
@@ -398,6 +399,13 @@ def _align_pyeong_to_source(ads: list[Ad], sources: list[SourceItem]) -> None:
     for a in ads:
         options = known.get((a.complex_name, a.dong))
         if not options or a.pyeong is None:
+            continue
+        # 매물장에서 이 동의 평형이 하나뿐이면 면적 환산 오차가 커도 그 평형으로 본다
+        # (예: 현대14차 205동 면적 환산 29평 → 32평).
+        if len(options) == 1:
+            only = next(iter(options))
+            if abs(only - a.pyeong) <= ALIGN_SINGLE_TYPE_TOLERANCE:
+                a.pyeong = only
             continue
         near = [p for p in options if abs(p - a.pyeong) <= PYEONG_TOLERANCE]
         if near:
