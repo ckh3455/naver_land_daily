@@ -342,9 +342,8 @@ def cluster_ads(ads: Iterable[Ad]) -> list[Cluster]:
 
     1) 정확층 광고끼리 묶는다(같은 층·가격 근접).
     2) 저/중/고 구간만 적힌 광고끼리 묶는다(같은 구간·가격 근접).
-    3) 구간 묶음은 붙을 수 있는 정확층 묶음이 '딱 하나'일 때만 합친다.
-       후보가 둘 이상이면(예: 고층 45억 ↔ 12층 46억·13층 45억) 어느 집인지
-       알 수 없으므로 따로 둔다.
+    3) 구간 묶음과 정확층 묶음은 합치지 않는다. 고층 45억이 13층인지 다른 호수인지
+       광고만으로는 알 수 없기 때문이다.
     """
     groups: dict[tuple[str, str], list[Ad]] = {}
     for ad in ads:
@@ -362,17 +361,9 @@ def cluster_ads(ads: Iterable[Ad]) -> list[Cluster]:
             exact_clusters.extend(_greedy_cluster(floor_ads))
         band_clusters = _greedy_cluster(band_ads)
 
-        leftover: list[Cluster] = []
-        for band_cluster in band_clusters:
-            candidates = [
-                ec for ec in exact_clusters
-                if all(_pyeong_close(ec, a) for a in band_cluster.ads)
-                and _can_merge(ec, band_cluster)
-            ]
-            if len(candidates) == 1:
-                candidates[0].ads.extend(band_cluster.ads)
-            else:
-                leftover.append(band_cluster)
+        # 구간 표기 광고는 정확층 광고와 합치지 않는다. 같은 동·구간에 광고에 안 나온
+        # 다른 호수(예: 저층 46억 = 405호)가 있을 수 있어, 합치면 매물장 대조가 틀어진다.
+        leftover = band_clusters
         clusters.extend(exact_clusters)
         clusters.extend(leftover)
     return clusters
@@ -457,7 +448,15 @@ def judge_cluster(cluster: Cluster, sources: list[SourceItem]) -> tuple[str, lis
         return STATUS_REGISTERED, near
     if active:
         return STATUS_PRICE_DIFF, active
-    return STATUS_INACTIVE, candidates
+    inactive_near = [
+        s for s in candidates
+        if (floor.exact is not None and s.floor.exact == floor.exact)
+        or _price_close(s.price, price, REGISTER_PRICE_TOLERANCE_MAN, REGISTER_PRICE_TOLERANCE_RATIO)
+    ]
+    if inactive_near:
+        return STATUS_INACTIVE, inactive_near
+    # 같은 동·층대의 거래완료·보류 건은 가격이 크게 달라 다른 집으로 본다
+    return STATUS_UNREGISTERED, candidates
 
 
 RESULT_HEADERS = [

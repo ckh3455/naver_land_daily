@@ -49,7 +49,8 @@ class MatchingTests(unittest.TestCase):
         rows = [ad("3동", "4/14", "46억", "A", "1")]
         self.assertEqual(build_results(rows, []), [])
 
-    def test_band_and_exact_ads_merge_into_one_genuine(self):
+    def test_band_ads_are_not_merged_into_exact_floor(self):
+        # 4층 46억(1곳)과 저층 46억(2곳)은 따로 본다 → 저층 묶음만 진성
         rows = [
             ad("3동", "4/14", "46억", "A", "1"),
             ad("3동", "저/14", "46억", "B", "2"),
@@ -58,7 +59,8 @@ class MatchingTests(unittest.TestCase):
         result = build_results(rows, [])
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0][0], STATUS_UNREGISTERED)
-        self.assertEqual(result[0][8], 3)  # 업소수
+        self.assertEqual(result[0][5], "저층(2)/14")
+        self.assertEqual(result[0][8], 2)  # 업소수
 
     def test_different_exact_floors_do_not_merge(self):
         rows = [
@@ -97,10 +99,17 @@ class MatchingTests(unittest.TestCase):
         self.assertEqual(result[0][5], "고층(4)/14")
         self.assertEqual(result[0][8], 4)
 
-    def test_floor_breakdown_label(self):
-        rows = [ad("3동", "4/14", "46억", "A", "1"), ad("3동", "저/14", "46억", "B", "2"),
-                ad("3동", "저/14", "46억", "C", "3")]
-        self.assertEqual(build_results(rows, [])[0][5], "4층(1)+저층(2)/14")
+    def test_band_ads_match_unadvertised_unit_in_source(self):
+        # 저층 46억 광고는 매물장 405호 46억(활성)으로 등록 판정
+        rows = [ad("3동", "저/14", "46억", "B", "2"), ad("3동", "저/14", "46억", "C", "3")]
+        result = build_results(rows, [src("3", "405", "저", "46"), src("3", "저층", "저", "55")])
+        self.assertEqual(result[0][0], STATUS_REGISTERED)
+
+    def test_closed_listing_with_far_price_is_unregistered(self):
+        # 고층 45억 광고 vs 매물장 1403호 60억(보류) → 다른 집으로 보고 미등록
+        rows = [ad("3동", "고/14", "45억", "A", "1"), ad("3동", "고/14", "45억", "B", "2")]
+        result = build_results(rows, [src("3", "1403", "고", "60", status="보류")])
+        self.assertEqual(result[0][0], STATUS_UNREGISTERED)
 
     def test_broker_alias_maps_and_counts_once(self):
         alias = build_broker_alias([
