@@ -1,0 +1,36 @@
+name: 예약 실행 유지 (60일 자동중지 방지)
+
+# GitHub은 공개 저장소에 60일간 커밋이 없으면 예약(schedule) 실행을 자동으로 끕니다.
+# 매주 한 번 API로 예약 워크플로우를 다시 활성화해 자동중지를 막습니다.
+# 커밋을 만들지 않으므로 저장소 이력이 늘어나지 않습니다.
+# PC가 꺼져 있어도 되도록 GitHub 클라우드 러너에서 실행합니다.
+
+on:
+  schedule:
+    # 매주 월요일 오전 9시 17분(한국시간)
+    - cron: "17 0 * * 1"
+  workflow_dispatch:
+
+permissions:
+  actions: write
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: 예약 워크플로우 재활성화
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -e
+          for wf in crawling.yml keepalive.yml; do
+            gh api -X PUT "repos/$REPO/actions/workflows/$wf/enable"
+            state=$(gh api "repos/$REPO/actions/workflows/$wf" --jq .state)
+            echo "$wf: $state"
+            if [ "$state" != "active" ]; then
+              echo "::error::$wf 활성화 실패 (state=$state)"
+              exit 1
+            fi
+          done
