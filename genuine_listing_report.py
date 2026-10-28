@@ -70,7 +70,7 @@ def _ensure_sheet(service, spreadsheet_id: str, title: str, cols: int) -> int:
         spreadsheetId=spreadsheet_id,
         body={"requests": [{"addSheet": {"properties": {
             "title": title, "index": 1,
-            "gridProperties": {"rows": 1000, "columnCount": cols, "frozenRowCount": 2},
+            "gridProperties": {"rowCount": 1000, "columnCount": cols, "frozenRowCount": 2},
         }}}]},
     ).execute()
     return reply["replies"][0]["addSheet"]["properties"]["sheetId"]
