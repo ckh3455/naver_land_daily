@@ -190,6 +190,16 @@ def broker_name_key(value: str) -> str:
     return re.sub(r"[\s()（）]+", "", _text(value)).lower()
 
 
+def broker_group(canon: str) -> str:
+    """실제상호의 네트워크 이름을 뽑는다.
+
+    '신-야베스-단압'처럼 '지역-네트워크-지점' 3단 표기는 가운데(야베스)로 묶고,
+    '구-천우1'처럼 2단 이하는 그대로 둔다.
+    """
+    parts = [p for p in _text(canon).split("-") if p]
+    return parts[1] if len(parts) >= 3 else _text(canon)
+
+
 def build_broker_alias(rows: Iterable[dict[str, str]]) -> dict[str, dict[str, str]]:
     """'압구정 중개업소 2' 탭(ID·중개업소명·실제상호)에서 ID/이름 → 실제상호 매핑을 만든다."""
     by_id: dict[str, str] = {}
@@ -232,8 +242,9 @@ def ads_from_rows(rows: Iterable[dict[str, str]],
         canon = alias["byId"].get(broker_id) if broker_id else None
         canon = canon or alias["byName"].get(broker_name_key(broker_name))
         if canon:
-            broker_key = "canon:" + broker_name_key(canon)
-            broker_name = canon
+            group = broker_group(canon)
+            broker_key = "group:" + broker_name_key(group)
+            broker_name = group
         else:
             broker_key = f"id:{broker_id}" if broker_id else "name:" + broker_name_key(broker_name)
         if _text(row.get("집주인")) == "집주인":
@@ -502,9 +513,13 @@ def build_results(rows: Iterable[dict[str, str]], source_rows: Iterable[dict[str
         floor = cluster.floor()
         prices = cluster.prices
         dates = sorted(a.registered for a in cluster.ads if a.registered and a.registered != "Unknown")
-        names = sorted({a.broker_name for a in cluster.ads if not a.owner and a.broker_name})
-        if any(a.owner for a in cluster.ads):
-            names.insert(0, "(집주인)")
+        # 같은 업소·네트워크는 한 번만 쓰고 광고 건수를 붙인다(예: 야베스(4))
+        name_counts = Counter(a.broker_name for a in cluster.ads if not a.owner and a.broker_name)
+        names = [f"{n}({c})" if c > 1 else n
+                 for n, c in sorted(name_counts.items(), key=lambda item: (-item[1], item[0]))]
+        owner_n = sum(1 for a in cluster.ads if a.owner)
+        if owner_n:
+            names.insert(0, f"(집주인)({owner_n})" if owner_n > 1 else "(집주인)")
         pyeongs = [a.pyeong for a in cluster.ads if a.pyeong is not None]
         ad0 = cluster.ads[0]
         related_text = "; ".join(

@@ -123,6 +123,20 @@ class MatchingTests(unittest.TestCase):
         self.assertEqual(result[0][8], 2)
         self.assertIn("본점", result[0][13])
 
+    def test_network_branches_count_as_one_broker(self):
+        alias = build_broker_alias([
+            {"ID": "Y1", "중개업소명": "단지내압구정", "실제상호": "신-야베스-단압"},
+            {"ID": "Y2", "중개업소명": "미성공인", "실제상호": "신-야베스-미"},
+            {"ID": "Y3", "중개업소명": "솔로몬", "실제상호": "신-야베스-솔"},
+            {"ID": "K1", "중개업소명": "큰부자", "실제상호": "신-큰부자"},
+        ])
+        rows = [ad("3동", "고/14", "45억", b, str(i)) for i, b in enumerate(["Y1", "Y2", "Y3", "Y1"])]
+        self.assertEqual(build_results(rows, [], broker_alias=alias), [])  # 야베스뿐 → 1곳
+        rows.append(ad("3동", "고/14", "45억", "K1", "9"))
+        result = build_results(rows, [], broker_alias=alias)
+        self.assertEqual(result[0][8], 2)
+        self.assertEqual(result[0][13], "야베스(4), 신-큰부자")
+
     def test_single_type_dong_adopts_source_pyeong(self):
         # 96㎡ → 환산 29평이지만 매물장 205동은 32평 하나뿐 → 32평으로 보고 등록 판정
         rows = [
