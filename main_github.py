@@ -393,14 +393,12 @@ class AggressiveCardScroll:
     async def handle_response(self, response):
         url = response.url
         # 단지 개요(사용승인일·주차대수·세대수). 단지 페이지를 열 때 사이트가 스스로 부르는 응답만 받는다.
-        if re.search(rf'/api/complexes/(overview/)?{self.complex_id}(\?|$)', url):
+        if re.search(rf'/api/complexes/(overview/)?{self.complex_id}([/?]|$)', url):
             try:
                 data = await response.json()
-                if isinstance(data, dict):
-                    detail = data.get('complexDetail') or data
-                    for key, value in detail.items():
-                        if value not in (None, "") and not self.complex_overview.get(key):
-                            self.complex_overview[key] = value
+                for key, value in _flatten_scalars(data):
+                    if value not in (None, "") and not self.complex_overview.get(key):
+                        self.complex_overview[key] = value
             except Exception as e:
                 debug_log(f"단지 개요 응답 파싱 실패: {url} - {str(e)}", "WARNING")
             return
@@ -838,6 +836,30 @@ def _format_ymd(value):
         return f"{digits[:4]}.{digits[4:6]}"
     return _clean_detail_value(value)
 
+def _flatten_scalars(obj, depth=0):
+    """중첩 응답에서 (키, 값) 쌍을 모두 꺼낸다. 필드가 어느 깊이에 있어도 찾을 수 있게."""
+    if depth > 4:
+        return
+    if isinstance(obj, dict):
+        for key, value in obj.items():
+            if isinstance(value, (dict, list)):
+                yield from _flatten_scalars(value, depth + 1)
+            else:
+                yield key, value
+    elif isinstance(obj, list):
+        for item in obj[:20]:
+            yield from _flatten_scalars(item, depth + 1)
+
+def _find_by_key_words(overview, must, exclude=()):
+    """키 이름에 must 단어가 모두 들어가고 exclude 단어는 없는 첫 값."""
+    for key, value in overview.items():
+        low = key.lower()
+        if all(w in low for w in must) and not any(w in low for w in exclude):
+            text = _clean_detail_value(value)
+            if text:
+                return text
+    return ""
+
 def format_complex_info_row(complex_info, overview):
     """네이버 단지 개요 응답에서 표시·광고 명시사항(사용승인일·주차대수)을 뽑는다."""
     if not isinstance(overview, dict) or not overview:
@@ -848,9 +870,12 @@ def format_complex_info_row(complex_info, overview):
         _first_detail_value(overview, ["totalHouseholdCount", "totalHouseHoldCount"]),
         _first_detail_value(overview, ["dongCount", "totalDongCount"]),
         _format_ymd(_first_detail_value(overview, ["useApproveYmd", "useApproveDate"])),
-        _first_detail_value(overview, ["parkingPossibleCount", "totalParkingCount"]),
-        _first_detail_value(overview, ["parkingCountByHousehold"]),
-        _first_detail_value(overview, ["heatMethodTypeName", "heatMethodTypeCode", "heatFuelTypeName"]),
+        _first_detail_value(overview, ["parkingPossibleCount", "totalParkingCount"])
+        or _find_by_key_words(overview, ["parking"], ["household", "rate", "ratio"]),
+        _first_detail_value(overview, ["parkingCountByHousehold"])
+        or _find_by_key_words(overview, ["parking", "household"]),
+        _first_detail_value(overview, ["heatMethodTypeName", "heatMethodTypeCode", "heatFuelTypeName"])
+        or _find_by_key_words(overview, ["heat"]),
         datetime.now().strftime("%Y-%m-%d"),
     ]
 
@@ -1970,7 +1995,9 @@ async def main():
         )
         result = await crawler.run()
         complex_duration = time.time() - complex_start_time
-        info_row = format_complex_info_row(complex_info, result.get('complex_overview'))
+        overview = result.get('complex_overview') or {}
+        debug_log(f"단지 개요 키: {sorted(overview.keys())}", "DEBUG")
+        info_row = format_complex_info_row(complex_info, overview)
         if info_row:
             complex_info_rows.append(info_row)
         else:
