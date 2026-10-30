@@ -341,6 +341,7 @@ class AggressiveCardScroll:
         self.api_responses = []
         self.more_data = True
         self.collect_broker_details_enabled = collect_broker_details
+        self.complex_overview = {}
 
     # --------------------------------------------------------------------
     # ✅ 접속(네트워크) 부분만 수정:
@@ -391,6 +392,18 @@ class AggressiveCardScroll:
 
     async def handle_response(self, response):
         url = response.url
+        # 단지 개요(사용승인일·주차대수·세대수). 단지 페이지를 열 때 사이트가 스스로 부르는 응답만 받는다.
+        if re.search(rf'/api/complexes/(overview/)?{self.complex_id}(\?|$)', url):
+            try:
+                data = await response.json()
+                if isinstance(data, dict):
+                    detail = data.get('complexDetail') or data
+                    for key, value in detail.items():
+                        if value not in (None, "") and not self.complex_overview.get(key):
+                            self.complex_overview[key] = value
+            except Exception as e:
+                debug_log(f"단지 개요 응답 파싱 실패: {url} - {str(e)}", "WARNING")
+            return
         if 'api/articles/complex' in url and 'page=' in url:
             try:
                 data = await response.json()
@@ -797,7 +810,8 @@ class AggressiveCardScroll:
                 'complex_id': self.complex_id,
                 'complex_name': self.complex_name,
                 'property_count': len(self.property_cards),
-                'properties': self.property_cards
+                'properties': self.property_cards,
+                'complex_overview': self.complex_overview
             }
         except Exception as e:
             debug_log(f"크롤링 중 치명적 오류 발생: {str(e)}", "ERROR")
@@ -809,6 +823,56 @@ class AggressiveCardScroll:
                 'properties': [],
                 'error': str(e)
             }
+
+COMPLEX_INFO_SHEET = "단지 기본정보"
+COMPLEX_INFO_HEADERS = [
+    "단지명", "네이버단지번호", "세대수", "동수", "사용승인일",
+    "총주차대수", "세대당주차", "난방", "수집일"
+]
+
+def _format_ymd(value):
+    digits = re.sub(r"\D", "", str(value or ""))
+    if len(digits) >= 8:
+        return f"{digits[:4]}.{digits[4:6]}.{digits[6:8]}"
+    if len(digits) == 6:
+        return f"{digits[:4]}.{digits[4:6]}"
+    return _clean_detail_value(value)
+
+def format_complex_info_row(complex_info, overview):
+    """네이버 단지 개요 응답에서 표시·광고 명시사항(사용승인일·주차대수)을 뽑는다."""
+    if not isinstance(overview, dict) or not overview:
+        return None
+    return [
+        complex_info["name"],
+        str(complex_info["id"]),
+        _first_detail_value(overview, ["totalHouseholdCount", "totalHouseHoldCount"]),
+        _first_detail_value(overview, ["dongCount", "totalDongCount"]),
+        _format_ymd(_first_detail_value(overview, ["useApproveYmd", "useApproveDate"])),
+        _first_detail_value(overview, ["parkingPossibleCount", "totalParkingCount"]),
+        _first_detail_value(overview, ["parkingCountByHousehold"]),
+        _first_detail_value(overview, ["heatMethodTypeName", "heatMethodTypeCode", "heatFuelTypeName"]),
+        datetime.now().strftime("%Y-%m-%d"),
+    ]
+
+def update_complex_info_sheet(spreadsheet, new_rows):
+    """이번에 받은 단지만 갱신하고, 못 받은 단지는 이전 값을 그대로 둔다."""
+    if not new_rows:
+        debug_log("단지 개요를 하나도 받지 못해 '단지 기본정보' 탭은 그대로 둡니다.", "WARNING")
+        return
+    try:
+        ws = spreadsheet.worksheet(COMPLEX_INFO_SHEET)
+        existing = ws.get_all_values()[1:]
+    except gspread.exceptions.WorksheetNotFound:
+        ws = spreadsheet.add_worksheet(title=COMPLEX_INFO_SHEET, rows=100, cols=len(COMPLEX_INFO_HEADERS))
+        existing = []
+    merged = {row[0]: row for row in existing if row and row[0]}
+    for row in new_rows:
+        merged[row[0]] = row
+    order = [c["name"] for c in COMPLEXES]
+    rows = sorted(merged.values(), key=lambda r: order.index(r[0]) if r[0] in order else len(order))
+    ws.clear()
+    ws.update(range_name="A1", values=[COMPLEX_INFO_HEADERS] + rows, value_input_option="RAW")
+    debug_log(f"✅ '{COMPLEX_INFO_SHEET}' 탭 {len(new_rows)}개 단지 갱신", "SUCCESS")
 
 def format_property_data(property_data):
     raw_data = property_data.get('raw_data', {})
@@ -1886,6 +1950,7 @@ async def main():
     debug_log("=== 2단계: 크롤링 실행 ===", "STEP")
     results = []
     all_rows = []
+    complex_info_rows = []
     active_broker_counts_by_id = {}
     active_broker_counts_by_name = {}
     total_start_time = time.time()
@@ -1905,6 +1970,11 @@ async def main():
         )
         result = await crawler.run()
         complex_duration = time.time() - complex_start_time
+        info_row = format_complex_info_row(complex_info, result.get('complex_overview'))
+        if info_row:
+            complex_info_rows.append(info_row)
+        else:
+            debug_log(f"{complex_info['name']} 단지 개요 응답을 받지 못함", "WARNING")
 
         if 'error' in result or result.get('property_count', 0) <= 0:
             results.append({
@@ -2011,6 +2081,12 @@ async def main():
     for start in range(0, len(all_rows), 500):
         worksheet.append_rows(all_rows[start:start + 500], value_input_option='RAW')
     debug_log(f"✅ 구글 시트 원본 {len(all_rows)}행 기록 완료", "SUCCESS")
+
+    # 단지 개요는 광고 명시사항 보조 자료라 실패해도 매물 수집 결과는 유지한다.
+    try:
+        update_complex_info_sheet(spreadsheet, complex_info_rows)
+    except Exception as e:
+        debug_log(f"'단지 기본정보' 탭 갱신 실패: {e}", "WARNING")
 
     # 4) 데이터 정리
     debug_log("\n=== 4단계: 데이터 정리 실행 ===", "STEP")
