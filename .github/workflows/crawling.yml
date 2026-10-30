@@ -6,6 +6,11 @@ on:
     # PC가 꺼져 있으면 최대 24시간 대기하며, 부팅 후 Runner가 연결되는 즉시 실행됩니다.
     - cron: "0 18 * * *"
   workflow_dispatch:
+    inputs:
+      collect_complex_info:
+        description: "단지정보(주차대수·난방)도 수집 (평소엔 일요일에만)"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -31,6 +36,7 @@ jobs:
       NAVER_CHANGE_FOLDER_ID: "1n--RaXCyjz8RAovf9uwtKabUIKj50wZl"
       NAVER_LOG_FOLDER_ID: "17lQp0aXVfmAuqM14GmkgBPvtfjA_t0UN"
       SOURCE_LISTING_SPREADSHEET_ID: "1QP56lm5kPBdsUhrgcgY2U-JdmukXIkKCSxefd1QExKE"
+      COLLECT_COMPLEX_INFO: ${{ inputs.collect_complex_info && '1' || '' }}
 
     steps:
       - name: 코드 체크아웃

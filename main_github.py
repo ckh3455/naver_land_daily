@@ -60,6 +60,22 @@ BROKER_DETAIL_ATTEMPTED = set()
 BROKER_DETAIL_CONSECUTIVE_FAILURES = 0
 BROKER_DETAIL_DISABLED = False
 
+# 단지마다 브라우저를 새로 띄우지 않고 한 번 띄운 것을 재사용한다(단지별로 컨텍스트만 새로 만든다).
+SHARED_PLAYWRIGHT = None
+SHARED_BROWSER = None
+
+async def close_shared_browser():
+    global SHARED_PLAYWRIGHT, SHARED_BROWSER
+    try:
+        if SHARED_BROWSER:
+            await SHARED_BROWSER.close()
+        if SHARED_PLAYWRIGHT:
+            await SHARED_PLAYWRIGHT.stop()
+    except Exception:
+        pass
+    SHARED_PLAYWRIGHT = None
+    SHARED_BROWSER = None
+
 def debug_log(message, level="INFO"):
     """초상세 디버깅 로그"""
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
@@ -248,6 +264,21 @@ def _extract_broker_detail(payload, fallback=None):
         "mobile_phone": mobile_phone
     }
 
+def _filter_detail_headers(request_headers):
+    """브라우저 요청 헤더 중 fetch로 다시 보낼 수 있는 것만 남긴다."""
+    blocked_headers = {
+        'host', 'content-length', 'cookie', 'connection',
+        'accept-encoding', 'sec-fetch-site', 'sec-fetch-mode',
+        'sec-fetch-dest'
+    }
+    return {
+        key: value
+        for key, value in (request_headers or {}).items()
+        if key.lower() not in blocked_headers
+        and not key.startswith(':')
+        and re.fullmatch(r'[!#$%&\'*+\-.^_`|~0-9A-Za-z]+', key)
+    }
+
 def _broker_cache_key(raw):
     realtor_id = _extract_realtor_id(raw)
     if realtor_id:
@@ -342,6 +373,7 @@ class AggressiveCardScroll:
         self.more_data = True
         self.collect_broker_details_enabled = collect_broker_details
         self.complex_overview = {}
+        self.list_request_headers = None
 
     # --------------------------------------------------------------------
     # ✅ 접속(네트워크) 부분만 수정:
@@ -350,26 +382,32 @@ class AggressiveCardScroll:
     async def setup_playwright(self):
         debug_log("=== Playwright 환경 설정 시작 ===", "STEP")
         try:
-            self.playwright = await async_playwright().start()
+            global SHARED_PLAYWRIGHT, SHARED_BROWSER
+            if SHARED_BROWSER and SHARED_BROWSER.is_connected():
+                self.browser = SHARED_BROWSER
+            else:
+                await close_shared_browser()
+                SHARED_PLAYWRIGHT = await async_playwright().start()
 
-            proxy_server = os.getenv("PROXY_SERVER", "").strip()
-            launch_kwargs = dict(
-                headless=True,
-                args=[
-                    '--disable-blink-features=AutomationControlled',
-                    '--no-sandbox',
-                    '--disable-dev-shm-usage',
-                    '--disable-gpu',
-                    '--disable-web-security',
-                    '--disable-features=VizDisplayCompositor',
-                    '--window-size=1920,1080'
-                ]
-            )
-            if proxy_server:
-                launch_kwargs["proxy"] = {"server": proxy_server}
-                debug_log(f"[PROXY] enabled: {proxy_server}", "WARNING")
+                proxy_server = os.getenv("PROXY_SERVER", "").strip()
+                launch_kwargs = dict(
+                    headless=True,
+                    args=[
+                        '--disable-blink-features=AutomationControlled',
+                        '--no-sandbox',
+                        '--disable-dev-shm-usage',
+                        '--disable-gpu',
+                        '--disable-web-security',
+                        '--disable-features=VizDisplayCompositor',
+                        '--window-size=1920,1080'
+                    ]
+                )
+                if proxy_server:
+                    launch_kwargs["proxy"] = {"server": proxy_server}
+                    debug_log(f"[PROXY] enabled: {proxy_server}", "WARNING")
 
-            self.browser = await self.playwright.chromium.launch(**launch_kwargs)
+                SHARED_BROWSER = await SHARED_PLAYWRIGHT.chromium.launch(**launch_kwargs)
+                self.browser = SHARED_BROWSER
 
             self.context = await self.browser.new_context(
                 viewport={'width': 1920, 'height': 1080},
@@ -403,6 +441,12 @@ class AggressiveCardScroll:
                 debug_log(f"단지 개요 응답 파싱 실패: {url} - {str(e)}", "WARNING")
             return
         if 'api/articles/complex' in url and 'page=' in url:
+            if self.list_request_headers is None:
+                # 매물 목록 요청도 상세조회와 같은 인증 헤더를 쓴다. 클릭으로 못 얻을 때 대신 쓴다.
+                try:
+                    self.list_request_headers = await response.request.all_headers()
+                except Exception:
+                    self.list_request_headers = {}
             try:
                 data = await response.json()
                 self.api_responses.append({
@@ -618,7 +662,11 @@ class AggressiveCardScroll:
 
         # 상세 API는 브라우저 화면에서 매물을 열 때 생성되는 인증 헤더가
         # 있어야 한다. 목록의 첫 매물을 실제로 한 번 클릭해 그 요청을 확보한다.
-        if representatives and not BROKER_DETAIL_DISABLED:
+        list_auth = {
+            k.lower(): v for k, v in (self.list_request_headers or {}).items()
+        }.get('authorization')
+        # 목록 요청에 인증 헤더가 있으면 매물 클릭(실패 시 5~10초 대기)을 건너뛴다.
+        if representatives and not BROKER_DETAIL_DISABLED and not list_auth:
             try:
                 await self.page.evaluate("""
                     () => {
@@ -646,19 +694,9 @@ class AggressiveCardScroll:
                     if seed_article_match:
                         seeded_payloads[seed_article_match.group(1)] = seed_payload
 
-                    request_headers = await seed_response.request.all_headers()
-                    blocked_headers = {
-                        'host', 'content-length', 'cookie', 'connection',
-                        'accept-encoding', 'sec-fetch-site', 'sec-fetch-mode',
-                        'sec-fetch-dest'
-                    }
-                    detail_headers = {
-                        key: value
-                        for key, value in request_headers.items()
-                        if key.lower() not in blocked_headers
-                        and not key.startswith(':')
-                        and re.fullmatch(r'[!#$%&\'*+\-.^_`|~0-9A-Za-z]+', key)
-                    }
+                    detail_headers = _filter_detail_headers(
+                        await seed_response.request.all_headers()
+                    )
                     debug_log(
                         "중개업소 상세조회 인증 준비 완료 "
                         f"(헤더: {', '.join(sorted(detail_headers.keys()))})",
@@ -670,6 +708,14 @@ class AggressiveCardScroll:
                     f"중개업소 상세조회 인증 준비 실패: {e}",
                     "WARNING"
                 )
+
+        if representatives and not detail_headers and self.list_request_headers:
+            detail_headers = _filter_detail_headers(self.list_request_headers)
+            debug_log(
+                "매물 목록 요청의 인증 헤더로 상세조회를 진행합니다 "
+                f"(헤더: {', '.join(sorted(detail_headers.keys()))})",
+                "INFO"
+            )
 
         total_representatives = len(representatives)
         for detail_index, (cache_key, prop) in enumerate(
@@ -808,11 +854,10 @@ class AggressiveCardScroll:
             debug_log(f"'단지정보' 탭 열기 실패: {e}", "WARNING")
 
     async def close_browser(self):
+        # 공유 브라우저는 남겨 두고 이 단지의 컨텍스트만 닫는다.
         try:
-            if hasattr(self, 'browser'):
-                await self.browser.close()
-            if hasattr(self, 'playwright'):
-                await self.playwright.stop()
+            if hasattr(self, 'context'):
+                await self.context.close()
         except Exception:
             pass
 
@@ -828,7 +873,8 @@ class AggressiveCardScroll:
                     "비교 단지는 중개업소 상세조회를 생략합니다.",
                     "INFO"
                 )
-            await self.open_complex_info_tab()
+            if should_collect_complex_info():
+                await self.open_complex_info_tab()
             await self.close_browser()
             return {
                 'complex_id': self.complex_id,
@@ -849,6 +895,13 @@ class AggressiveCardScroll:
             }
 
 COMPLEX_INFO_SHEET = "단지 기본정보"
+
+def should_collect_complex_info(now=None):
+    """주차대수·난방은 거의 안 바뀌므로 '단지정보' 탭 클릭은 일요일에만 한다.
+    COLLECT_COMPLEX_INFO=1 이면 요일과 관계없이 수집한다."""
+    if os.getenv("COLLECT_COMPLEX_INFO", "").strip() == "1":
+        return True
+    return (now or datetime.now()).weekday() == 6
 COMPLEX_INFO_HEADERS = [
     "단지명", "네이버단지번호", "세대수", "동수", "사용승인일",
     "총주차대수", "세대당주차", "난방", "수집일"
@@ -924,7 +977,12 @@ def update_complex_info_sheet(spreadsheet, new_rows):
         existing = []
     merged = {row[0]: row for row in existing if row and row[0]}
     for row in new_rows:
-        merged[row[0]] = row
+        old = merged.get(row[0], [])
+        # 이번에 비어 있는 칸(주 1회만 받는 주차·난방 등)은 이전 값을 유지한다.
+        merged[row[0]] = [
+            value if value not in ("", None) else (old[i] if i < len(old) else "")
+            for i, value in enumerate(row)
+        ]
     order = [c["name"] for c in COMPLEXES]
     rows = sorted(merged.values(), key=lambda r: order.index(r[0]) if r[0] in order else len(order))
     ws.clear()
@@ -2109,6 +2167,8 @@ async def main():
 
         if idx < len(COMPLEXES):
             await asyncio.sleep(0.2)
+
+    await close_shared_browser()
 
     # 3) 결과 검증 후에만 시트 교체
     successful_count = sum(1 for r in results if r['status'] == 'success')
