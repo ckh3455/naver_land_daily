@@ -854,6 +854,9 @@ COMPLEX_INFO_HEADERS = [
     "총주차대수", "세대당주차", "난방", "수집일"
 ]
 
+# 네이버 난방 방식 코드 (단지정보 탭 표기 기준)
+HEAT_METHOD_NAMES = {"HT001": "개별난방", "HT002": "중앙난방", "HT005": "지역난방"}
+
 def _format_ymd(value):
     digits = re.sub(r"\D", "", str(value or ""))
     if len(digits) >= 8:
@@ -900,8 +903,11 @@ def format_complex_info_row(complex_info, overview):
         or _find_by_key_words(overview, ["parking"], ["household", "rate", "ratio"]),
         _first_detail_value(overview, ["parkingCountByHousehold"])
         or _find_by_key_words(overview, ["parking", "household"]),
-        _first_detail_value(overview, ["heatMethodTypeName", "heatMethodTypeCode", "heatFuelTypeName"])
-        or _find_by_key_words(overview, ["heat"]),
+        HEAT_METHOD_NAMES.get(
+            _first_detail_value(overview, ["heatMethodTypeCode"]),
+            _first_detail_value(overview, ["heatMethodTypeName", "heatMethodTypeCode"])
+            or _find_by_key_words(overview, ["heat"])
+        ),
         datetime.now().strftime("%Y-%m-%d"),
     ]
 
