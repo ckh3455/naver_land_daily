@@ -782,6 +782,31 @@ class AggressiveCardScroll:
             "SUCCESS"
         )
 
+    async def open_complex_info_tab(self):
+        """매물 수집이 끝난 뒤 '단지정보' 탭을 눌러 주차대수·난방 응답을 받는다."""
+        try:
+            clicked = await self.page.evaluate("""
+                () => {
+                    const el = Array.from(document.querySelectorAll('a, button, span'))
+                        .find(e => (e.innerText || '').trim() === '단지정보');
+                    if (el) { el.click(); return true; }
+                    return false;
+                }
+            """)
+            if not clicked:
+                debug_log("'단지정보' 탭을 찾지 못함", "WARNING")
+                return
+            try:
+                await self.page.wait_for_response(
+                    lambda r: f'/api/complexes/{self.complex_id}' in r.url,
+                    timeout=5000
+                )
+            except Exception:
+                pass
+            await asyncio.sleep(1.5)
+        except Exception as e:
+            debug_log(f"'단지정보' 탭 열기 실패: {e}", "WARNING")
+
     async def close_browser(self):
         try:
             if hasattr(self, 'browser'):
@@ -803,6 +828,7 @@ class AggressiveCardScroll:
                     "비교 단지는 중개업소 상세조회를 생략합니다.",
                     "INFO"
                 )
+            await self.open_complex_info_tab()
             await self.close_browser()
             return {
                 'complex_id': self.complex_id,
